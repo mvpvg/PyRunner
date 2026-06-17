@@ -89,6 +89,7 @@ TEMPLATES = [
                 "django.contrib.auth.context_processors.auth",
                 "django.contrib.messages.context_processors.messages",
                 "core.context_processors.pyrunner_version",
+                "core.context_processors.plugin_nav",
             ],
         },
     },
@@ -122,6 +123,93 @@ def _enable_sqlite_wal(sender, connection, **kwargs):
 from django.db.backends.signals import connection_created
 
 connection_created.connect(_enable_sqlite_wal)
+
+
+# =============================================================================
+# Plugin system (safe loader)
+# =============================================================================
+# A plugin is a self-contained Django app living on the persistent volume at
+# PLUGINS_DIR. The spine of the safety model is: "installed" (files on disk) is
+# NOT "active" (loaded), and nothing risky enters this process without passing
+# an isolated `plugin_preflight` subprocess first. Only plugins with
+# status='active' in the `plugins` table are ever imported here, and every
+# import is guarded so a broken plugin can never stop the site from booting.
+#
+# This block is deliberately self-contained (it does not import from `core`):
+# a failure while importing a core module here would defeat the kill switch.
+import importlib as _importlib
+import re as _re
+import sqlite3 as _sqlite3
+
+PLUGINS_DIR = BASE_DIR / "plugins"
+INSTALLED_PLUGINS = []  # ["plugins.<slug>", ...] actually loaded this boot
+PLUGIN_LOAD_ERRORS = {}  # {slug: repr(exception)} for plugins skipped at boot
+
+_PLUGIN_SLUG_RE = _re.compile(r"^[a-z][a-z0-9_]*$")
+
+
+def _plugin_slug_ok(slug):
+    return bool(slug and isinstance(slug, str) and _PLUGIN_SLUG_RE.match(slug))
+
+
+def _active_plugin_slugs():
+    """Active plugin slugs, read straight from sqlite at import time.
+
+    Mirrors `_get_q_cluster_config()`'s "read the DB before Django is ready"
+    pattern, but with a read-only connection so it can never create or lock the
+    database. Fully guarded: a missing table (pre-migrate), an absent/locked db,
+    or any other error yields an empty list — never an exception.
+    """
+    db_path = DATABASES["default"]["NAME"]
+    try:
+        con = _sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            rows = con.execute(
+                "SELECT slug FROM plugins WHERE status = 'active'"
+            ).fetchall()
+        finally:
+            con.close()
+    except Exception:
+        return []
+    return [r[0] for r in rows if _plugin_slug_ok(r[0])]
+
+
+def _light_import_ok(slug):
+    """Guarded pre-check: import the plugin package and its `apps` module.
+
+    This intentionally does NOT import models/views — defining a model before
+    the app registry is populated is illegal, and views are imported lazily by
+    urls. It only catches a broken __init__.py or apps.py before the app is
+    added to INSTALLED_APPS. Deeper failures (models, urls, migrations) are
+    caught by `plugin_preflight` in an isolated subprocess before the server
+    starts, which flips the offending plugin to ERRORED.
+    """
+    try:
+        _importlib.import_module(f"plugins.{slug}")
+        _importlib.import_module(f"plugins.{slug}.apps")
+        return True, ""
+    except Exception as exc:  # never let a plugin stop the boot
+        return False, repr(exc)
+
+
+_preflight_slug = os.environ.get("PYRUNNER_PREFLIGHT_SLUG")
+if _preflight_slug and _plugin_slug_ok(_preflight_slug):
+    # Isolated preflight subprocess: load EXACTLY this one plugin, UNGUARDED, so
+    # any import error propagates and fails the subprocess (the caller then
+    # quarantines it). This mode is never used by the live web/worker process.
+    INSTALLED_APPS.append(f"plugins.{_preflight_slug}")
+    INSTALLED_PLUGINS.append(f"plugins.{_preflight_slug}")
+elif os.environ.get("PYRUNNER_DISABLE_PLUGINS"):
+    # Kill switch: boot with zero plugins (a guaranteed-clean recovery boot).
+    pass
+else:
+    for _slug in _active_plugin_slugs():
+        _ok, _err = _light_import_ok(_slug)
+        if _ok:
+            INSTALLED_APPS.append(f"plugins.{_slug}")
+            INSTALLED_PLUGINS.append(f"plugins.{_slug}")
+        else:
+            PLUGIN_LOAD_ERRORS[_slug] = _err
 
 
 # Custom User Model

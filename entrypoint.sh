@@ -26,9 +26,36 @@ if [ -z "$ENCRYPTION_KEY" ]; then
     exit 1
 fi
 
-# Run setup (migrations + default environment)
+# Run setup (migrations + default environment) with plugins DISABLED. setup runs
+# django.setup(), which would otherwise import every ACTIVE plugin — and a broken
+# one (e.g. a throwing ready()) would crash migrations/boot BEFORE the preflight
+# step below ever gets a chance to quarantine it. Core migrations don't need
+# plugins loaded; each plugin's own migrations are applied per-plugin by the
+# preflight step (in isolation), not here.
 echo "[*] Running setup..."
-python manage.py setup
+PYRUNNER_DISABLE_PLUGINS=1 python manage.py setup
+
+# --- Plugin system ----------------------------------------------------------
+# Seed the plugins package so `import plugins.<slug>` resolves even on a fresh
+# (empty) data volume, then validate every ACTIVE plugin in its own subprocess
+# BEFORE the web server imports anything. Broken plugins are flipped to ERRORED
+# (quarantined) so gunicorn only ever loads plugins that just passed in
+# isolation. This step is never fatal: the orchestrator always exits 0, and the
+# `|| true` is a final backstop so a broken plugin can never block startup.
+PLUGINS_DIR="${PLUGINS_DIR:-/app/plugins}"
+mkdir -p "$PLUGINS_DIR"
+if [ ! -f "$PLUGINS_DIR/__init__.py" ]; then
+    echo "# PyRunner plugins package (auto-seeded). Do not delete." > "$PLUGINS_DIR/__init__.py"
+fi
+
+# Seed the bundled example plugin on first boot only (INSTALLED, never active),
+# so a fresh deployment has an example to look at / try / delete. Idempotent and
+# never fatal.
+echo "[*] Seeding example plugin (first boot only)..."
+PYRUNNER_DISABLE_PLUGINS=1 python manage.py seed_example_plugin || true
+
+echo "[*] Preflighting plugins..."
+PYRUNNER_DISABLE_PLUGINS=1 python manage.py plugin_preflight --all --disable-broken || true
 
 echo ""
 echo "[*] Starting services..."

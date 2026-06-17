@@ -112,23 +112,21 @@ def _handle_magic_link_request(request: HttpRequest) -> HttpResponse:
     user_exists = User.objects.filter(email=email).exists()
     is_first_user = User.objects.count() == 0
 
-    # If user doesn't exist and it's not the first user, check registration settings
+    # Registration is invite-only, enforced in code (not a runtime toggle). The
+    # first user bootstraps the admin account; everyone else needs a valid invite.
     if not user_exists and not is_first_user:
-        settings = GlobalSettings.get_settings()
-        if not settings.allow_registration:
-            # Check for valid invite
-            has_valid_invite = UserInvite.objects.filter(
-                email=email,
-                used_at__isnull=True,
-                expires_at__gt=timezone.now()
-            ).exists()
+        has_valid_invite = UserInvite.objects.filter(
+            email=email,
+            used_at__isnull=True,
+            expires_at__gt=timezone.now()
+        ).exists()
 
-            if not has_valid_invite:
-                messages.error(
-                    request,
-                    "Registration is invite-only. Please contact an administrator."
-                )
-                return redirect("auth:login")
+        if not has_valid_invite:
+            messages.error(
+                request,
+                "Registration is invite-only. Please contact an administrator."
+            )
+            return redirect("auth:login")
 
     ip_address = get_client_ip(request)
     token = MagicToken.create_for_email(email, ip_address)

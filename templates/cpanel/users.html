@@ -31,17 +31,13 @@
             </div>
             {% endif %}
 
-            <!-- Registration settings -->
+            <!-- Registration policy -->
             <div class="rounded-2xl border border-line bg-panel p-6">
-                <div class="flex items-center justify-between gap-4">
+                <div class="flex items-center gap-4">
                     <div>
-                        <h3 class="text-base font-semibold text-text mb-1">Open registration</h3>
-                        <p class="text-sm text-muted">{% if allow_registration %}Anyone can create an account by entering their email.{% else %}Only invited users can create accounts.{% endif %}</p>
+                        <h3 class="text-base font-semibold text-text mb-1">Registration is invite-only</h3>
+                        <p class="text-sm text-muted">New accounts can only be created from an invite. Use the Invite button above to add a team member.</p>
                     </div>
-                    <form method="post" action="{% url 'cpanel:toggle_registration' %}">
-                        {% csrf_token %}
-                        <button type="submit" class="text-[13px] font-medium px-3.5 py-2 rounded-lg transition {% if allow_registration %}bg-warn text-ink hover:opacity-90{% else %}bg-ok text-ink hover:opacity-90{% endif %}">{% if allow_registration %}Disable{% else %}Enable{% endif %}</button>
-                    </form>
                 </div>
             </div>
 

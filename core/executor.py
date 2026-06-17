@@ -453,3 +453,100 @@ def execute_run(run: Run, webhook_data: dict | None = None) -> None:
             f"Run {run.id} completed with status {run.status} "
             f"(exit_code={run.exit_code})"
         )
+
+
+def run_in_environment(
+    environment,
+    *,
+    code: str | None = None,
+    path: str | None = None,
+    args: list | None = None,
+    timeout: int | None = 60,
+    cwd: str | None = None,
+    env: dict | None = None,
+) -> tuple[int, str, str]:
+    """Run a helper in a PyRunner environment's venv as an isolated subprocess.
+
+    This is the safe path for plugin *compute*: third-party packages run in the
+    chosen environment's venv (a subprocess), never inside the Django process —
+    so a bad package fails a *call*, not the server. It reuses the executor's
+    hardened pattern: the environment's Python, process-group/session isolation,
+    a timeout, and captured + size-capped output.
+
+    Provide exactly one of ``code`` (a string of Python source) or ``path`` (an
+    absolute path to a ``.py`` file already on disk). ``args`` are passed as argv.
+
+    Returns ``(exit_code, stdout, stderr)``. On timeout the whole process tree is
+    killed and ``exit_code`` is ``-1``.
+    """
+    if (code is None) == (path is None):
+        raise ValueError("Provide exactly one of `code` or `path`.")
+
+    if not environment.exists():
+        raise EnvironmentNotFoundError(
+            f"Environment directory not found: {environment.get_full_path()}"
+        )
+    python_path = environment.get_python_executable()
+    if not os.path.isfile(python_path):
+        raise PythonNotFoundError(f"Python executable not found: {python_path}")
+
+    workdir = Path(settings.SCRIPTS_WORKDIR)
+    workdir.mkdir(parents=True, exist_ok=True)
+
+    temp_file = None
+    try:
+        if code is not None:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                suffix=".py",
+                delete=False,
+                encoding="utf-8",
+                dir=str(workdir),
+            ) as fh:
+                fh.write(code)
+                temp_file = fh.name
+            script_path = temp_file
+        else:
+            script_path = path
+
+        cmd = [python_path, script_path] + [str(a) for a in (args or [])]
+
+        run_env = dict(os.environ)
+        if env:
+            run_env.update({k: str(v) for k, v in env.items()})
+
+        popen_kwargs = {
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "cwd": str(cwd) if cwd else str(workdir),
+            "text": True,
+            "encoding": "utf-8",
+            "errors": "replace",
+            "env": run_env,
+        }
+        if os.name == "nt":
+            popen_kwargs["creationflags"] = (
+                subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
+            )
+        else:
+            popen_kwargs["start_new_session"] = True
+
+        proc = subprocess.Popen(cmd, **popen_kwargs)
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+            return (
+                proc.returncode,
+                _truncate_output(stdout or ""),
+                _truncate_output(stderr or ""),
+            )
+        except subprocess.TimeoutExpired:
+            _kill_process_tree(proc.pid)
+            stdout, stderr = proc.communicate()
+            stderr = (stderr or "") + f"\n\n[TIMEOUT: exceeded {timeout}s]"
+            return -1, _truncate_output(stdout or ""), _truncate_output(stderr)
+    finally:
+        if temp_file:
+            try:
+                os.unlink(temp_file)
+            except OSError:
+                pass

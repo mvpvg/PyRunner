@@ -13,6 +13,7 @@ from .s3_service import S3Service, S3ServiceError
 from .backup_schedule_service import BackupScheduleService
 from .claude_service import ClaudeService, ClaudeServiceError
 from .recaptcha_service import RecaptchaService
+from .plugin_service import PluginService, PluginInstallError
 
 __all__ = [
     "ScheduleService",
@@ -29,4 +30,6 @@ __all__ = [
     "ClaudeService",
     "ClaudeServiceError",
     "RecaptchaService",
+    "PluginService",
+    "PluginInstallError",
 ]

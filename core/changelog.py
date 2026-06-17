@@ -8,6 +8,51 @@ When you cut a release, bump ``pyrunner/version.py`` and add an entry here.
 
 CHANGELOG = [
     {
+        "version": "1.10.0",
+        "date": "June 15, 2026",
+        "headline": (
+            "Plugins — extend PyRunner with self-contained apps you upload, "
+            "validate, and activate, with a hard guarantee that a broken plugin "
+            "can never take down your site."
+        ),
+        "changes": [
+            {
+                "tag": "Added",
+                "title": "Plugin system",
+                "body": (
+                    "Install plugins from the console under Plugins (superuser "
+                    "only): upload a .zip, then Activate to validate and enable it. "
+                    "A plugin is a self-contained Django app that adds pages to the "
+                    "sidebar and serves at /plugins/<slug>/ — no core edits, no "
+                    "fork. See docs/plugins.md and examples/example_plugin for how "
+                    "to write one."
+                ),
+            },
+            {
+                "tag": "Added",
+                "title": "Safe by design — a broken plugin can't break the site",
+                "body": (
+                    "Installed is not active: uploading never imports plugin code. "
+                    "Activation validates the plugin in a throwaway subprocess "
+                    "first, and every boot re-checks each active plugin in "
+                    "isolation, auto-quarantining any that fail. Plugin pages and "
+                    "compute are sandboxed, and a kill switch "
+                    "(PYRUNNER_DISABLE_PLUGINS=1) guarantees a clean recovery boot."
+                ),
+            },
+            {
+                "tag": "Added",
+                "title": "Run plugin compute in an environment",
+                "body": (
+                    "Plugins run heavy or third-party-dependent work inside a "
+                    "chosen environment's venv via run_in_environment — an isolated "
+                    "subprocess with a timeout and captured output — so extra "
+                    "packages never touch the main app."
+                ),
+            },
+        ],
+    },
+    {
         "version": "1.9.0",
         "date": "June 14, 2026",
         "headline": (

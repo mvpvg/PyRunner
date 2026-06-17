@@ -7,6 +7,9 @@ services:
     volumes:
       # Persist database and environments
       - pyrunner_data:/app/data
+      # Uploaded plugins live here so they survive redeploys. Empty on a fresh
+      # install.
+      - pyrunner_plugins:/app/plugins
     environment:
       # Required - container will fail to start if not set.
       # Generate with the commands shown in .env.example
@@ -45,4 +48,6 @@ services:
 
 volumes:
   pyrunner_data:
+    driver: local
+  pyrunner_plugins:
     driver: local

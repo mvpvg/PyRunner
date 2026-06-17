@@ -15,11 +15,17 @@ Including another URLconf
     2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
 """
 
+import importlib
+import logging
+
+from django.conf import settings
 from django.contrib import admin
 from django.urls import path, include
 from django.shortcuts import redirect
 
 from core.views.webhooks import webhook_trigger_view
+
+logger = logging.getLogger(__name__)
 
 
 def get_admin_url_slug():
@@ -45,3 +51,21 @@ urlpatterns = [
     path("webhook/<str:token>/", webhook_trigger_view, name="webhook_trigger"),
     path("", lambda request: redirect("auth:login")),
 ]
+
+
+# Auto-mount each loaded plugin at /plugins/<slug>/. Each mount is guarded: a
+# plugin whose urls.py (or a view it imports) is broken simply doesn't mount —
+# core routes are unaffected. The set of plugins here is already constrained to
+# those that passed the guarded loader in settings.py.
+for _app in getattr(settings, "INSTALLED_PLUGINS", []):
+    _slug = _app.rsplit(".", 1)[-1]
+    try:
+        importlib.import_module(f"{_app}.urls")
+        urlpatterns.append(path(f"plugins/{_slug}/", include(f"{_app}.urls")))
+    except ModuleNotFoundError as _exc:
+        # No urls.py at all is fine (a plugin may have no routes); anything else
+        # is a real failure to skip.
+        if _exc.name not in (f"{_app}.urls",):
+            logger.exception("Plugin %r URL mount failed; skipping", _slug)
+    except Exception:
+        logger.exception("Plugin %r URL mount failed; skipping", _slug)

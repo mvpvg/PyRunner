@@ -17,6 +17,7 @@ from .tag import Tag
 from .datastore import DataStore, DataStoreEntry
 from .api_token import DataStoreAPIToken
 from .claude_usage import ClaudeUsage
+from .plugin import Plugin
 
 __all__ = [
     "User",
@@ -36,4 +37,5 @@ __all__ = [
     "DataStoreEntry",
     "DataStoreAPIToken",
     "ClaudeUsage",
+    "Plugin",
 ]

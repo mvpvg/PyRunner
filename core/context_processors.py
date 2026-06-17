@@ -20,3 +20,16 @@ def pyrunner_version(request):
         context.setdefault("update_latest_version", "")
 
     return context
+
+
+def plugin_nav(request):
+    """Sidebar nav items contributed by active plugins (empty for anonymous).
+
+    Wrapped defensively so a misbehaving plugin's nav can never break rendering.
+    """
+    try:
+        from core.plugins import nav_for
+
+        return {"plugin_nav": nav_for(getattr(request, "user", None))}
+    except Exception:
+        return {"plugin_nav": []}

@@ -85,7 +85,6 @@ from core.views.users import (
     user_list_view,
     invite_user_view,
     revoke_invite_view,
-    toggle_registration_view,
     delete_user_view,
 )
 from core.views.logs import (
@@ -114,6 +113,15 @@ from core.views.services import (
     claude_settings_view,
     claude_test_connection_view,
     claude_usage_view,
+)
+from core.views.plugins import (
+    plugin_list_view,
+    plugin_upload_view,
+    plugin_activate_view,
+    plugin_deactivate_view,
+    plugin_delete_view,
+    plugin_restart_view,
+    plugin_restarting_view,
 )
 
 app_name = "cpanel"
@@ -223,7 +231,6 @@ urlpatterns = [
     path("users/invite/", invite_user_view, name="invite_user"),
     path("users/invite/<int:pk>/revoke/", revoke_invite_view, name="revoke_invite"),
     path("users/<int:pk>/delete/", delete_user_view, name="delete_user"),
-    path("users/toggle-registration/", toggle_registration_view, name="toggle_registration"),
 
     # Logs
     path("logs/", logs_view, name="logs"),
@@ -244,4 +251,13 @@ urlpatterns = [
     path("services/claude/", claude_settings_view, name="claude_settings"),
     path("services/claude/test/", claude_test_connection_view, name="claude_test_connection"),
     path("services/claude/usage/", claude_usage_view, name="claude_usage"),
+
+    # Plugins (superuser)
+    path("plugins/", plugin_list_view, name="plugin_list"),
+    path("plugins/upload/", plugin_upload_view, name="plugin_upload"),
+    path("plugins/restart/", plugin_restart_view, name="plugin_restart"),
+    path("plugins/restarting/", plugin_restarting_view, name="plugin_restarting"),
+    path("plugins/<uuid:pk>/activate/", plugin_activate_view, name="plugin_activate"),
+    path("plugins/<uuid:pk>/deactivate/", plugin_deactivate_view, name="plugin_deactivate"),
+    path("plugins/<uuid:pk>/delete/", plugin_delete_view, name="plugin_delete"),
 ]

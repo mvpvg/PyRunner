@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+
+{% block title %}Sales Dashboard - PyRunner{% endblock %}
+
+{% block content %}
+<div class="flex">
+    {% include "cpanel/_sidebar.html" %}
+
+    <div class="flex-1 min-w-0">
+        <div class="px-5 lg:px-8 py-7 max-w-[1440px] mx-auto space-y-5">
+
+            <!-- Header -->
+            <div class="flex items-start justify-between gap-4">
+                <div>
+                    <h1 class="text-[22px] font-semibold tracking-tight">Sales Dashboard</h1>
+                    <p class="text-sm text-muted mt-1">
+                        Orders saved by the <span class="font-mono">Sales Collector</span> script
+                        {% if last_run %}· last collected {{ last_run }}{% endif %}
+                    </p>
+                </div>
+                <form method="post" action="{% url 'sales_dashboard:run' %}">
+                    {% csrf_token %}
+                    <button type="submit" class="inline-flex items-center gap-2 text-[13px] font-medium px-3.5 py-2 rounded-lg bg-ok text-ink hover:opacity-90 transition">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"/><circle cx="12" cy="12" r="9"/></svg>
+                        Run collector now
+                    </button>
+                </form>
+            </div>
+
+            {% if not store_exists %}
+            <section class="rounded-2xl border border-warn/30 bg-warn/10 p-4 text-sm text-muted">
+                DataStore <span class="font-mono text-text">sales_data</span> not found. Create it under
+                <a href="{% url 'cpanel:datastore_list' %}" class="text-ok hover:underline">Data Stores</a>,
+                add the <span class="font-mono text-text">Sales Collector</span> script, and run it.
+            </section>
+            {% elif order_count == 0 %}
+            <section class="rounded-2xl border border-line bg-panel px-6 py-16 text-center">
+                <h3 class="text-base font-semibold mb-1">No orders yet</h3>
+                <p class="text-sm text-muted mb-6">Run the Sales Collector to populate the dashboard.</p>
+                <form method="post" action="{% url 'sales_dashboard:run' %}">
+                    {% csrf_token %}
+                    <button type="submit" class="inline-flex items-center gap-2 text-[13px] font-medium px-3.5 py-2 rounded-lg bg-ok text-ink hover:opacity-90 transition">Run collector now</button>
+                </form>
+            </section>
+            {% else %}
+
+            <!-- KPI cards -->
+            <div class="grid grid-cols-2 lg:grid-cols-4 gap-5">
+                <div class="rounded-2xl border border-line bg-panel p-5">
+                    <div class="eyebrow text-faint">Revenue</div>
+                    <div class="text-2xl font-semibold tracking-tight mt-1.5 text-ok">${{ total_revenue }}</div>
+                </div>
+                <div class="rounded-2xl border border-line bg-panel p-5">
+                    <div class="eyebrow text-faint">Orders</div>
+                    <div class="text-2xl font-semibold tracking-tight mt-1.5">{{ order_count }}</div>
+                </div>
+                <div class="rounded-2xl border border-line bg-panel p-5">
+                    <div class="eyebrow text-faint">Units sold</div>
+                    <div class="text-2xl font-semibold tracking-tight mt-1.5">{{ units }}</div>
+                </div>
+                <div class="rounded-2xl border border-line bg-panel p-5">
+                    <div class="eyebrow text-faint">Avg order</div>
+                    <div class="text-2xl font-semibold tracking-tight mt-1.5">${{ avg_order }}</div>
+                </div>
+            </div>
+
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
+                <!-- By product -->
+                <section class="rounded-2xl border border-line bg-panel overflow-hidden">
+                    <div class="px-5 py-4 border-b border-line-soft"><h2 class="text-sm font-semibold">Revenue by product</h2></div>
+                    <table class="w-full">
+                        <thead><tr class="border-b border-line-soft text-left">
+                            <th class="px-5 py-2.5 eyebrow text-faint font-normal">Product</th>
+                            <th class="px-5 py-2.5 eyebrow text-faint font-normal text-right">Units</th>
+                            <th class="px-5 py-2.5 eyebrow text-faint font-normal text-right">Revenue</th>
+                        </tr></thead>
+                        <tbody class="divide-y divide-line-soft">
+                            {% for p in products %}
+                            <tr class="hover:bg-panel-hi/50 transition-colors">
+                                <td class="px-5 py-2.5 text-[13.5px] text-text">{{ p.product }}</td>
+                                <td class="px-5 py-2.5 text-sm text-muted text-right font-mono">{{ p.qty }}</td>
+                                <td class="px-5 py-2.5 text-sm text-right font-mono text-ok">${{ p.revenue }}</td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </section>
+
+                <!-- Recent orders -->
+                <section class="rounded-2xl border border-line bg-panel overflow-hidden">
+                    <div class="px-5 py-4 border-b border-line-soft"><h2 class="text-sm font-semibold">Recent orders</h2></div>
+                    <table class="w-full">
+                        <thead><tr class="border-b border-line-soft text-left">
+                            <th class="px-5 py-2.5 eyebrow text-faint font-normal">When</th>
+                            <th class="px-5 py-2.5 eyebrow text-faint font-normal">Product</th>
+                            <th class="px-5 py-2.5 eyebrow text-faint font-normal text-right">Qty</th>
+                            <th class="px-5 py-2.5 eyebrow text-faint font-normal text-right">Revenue</th>
+                        </tr></thead>
+                        <tbody class="divide-y divide-line-soft">
+                            {% for o in recent %}
+                            <tr class="hover:bg-panel-hi/50 transition-colors">
+                                <td class="px-5 py-2.5 text-xs font-mono text-faint">{{ o.ts }}</td>
+                                <td class="px-5 py-2.5 text-[13.5px] text-text">{{ o.product }}</td>
+                                <td class="px-5 py-2.5 text-sm text-muted text-right font-mono">{{ o.qty }}</td>
+                                <td class="px-5 py-2.5 text-sm text-right font-mono text-ok">${{ o.revenue }}</td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </section>
+            </div>
+            {% endif %}
+
+        </div>
+    </div>
+</div>
+{% endblock %}

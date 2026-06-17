@@ -41,6 +41,9 @@ services:
       - GUNICORN_TIMEOUT=${GUNICORN_TIMEOUT:-120}
     volumes:
       - pyrunner_data:/app/data
+      # Uploaded plugins live here so they survive redeploys (stock image +
+      # injected plugins, no fork). Empty on a fresh install.
+      - pyrunner_plugins:/app/plugins
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/')"]
@@ -51,4 +54,6 @@ services:
 
 volumes:
   pyrunner_data:
+    driver: local
+  pyrunner_plugins:
     driver: local

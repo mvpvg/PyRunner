@@ -33,6 +33,23 @@ FILE_CLASS = (
 CONSOLE_INPUT_CLASS = INPUT_CLASS
 
 
+class PluginUploadForm(forms.Form):
+    """Upload a plugin packaged as a ``.zip`` (superuser only)."""
+
+    plugin_file = forms.FileField(
+        label="Plugin .zip",
+        help_text="A .zip whose single top-level folder is the plugin and contains "
+        "plugin.json (slug, name, version).",
+        widget=forms.ClearableFileInput(attrs={"class": FILE_CLASS, "accept": ".zip"}),
+    )
+
+    def clean_plugin_file(self):
+        f = self.cleaned_data["plugin_file"]
+        if not (f.name or "").lower().endswith(".zip"):
+            raise forms.ValidationError("Plugin must be a .zip file.")
+        return f
+
+
 # Common timezone choices (sorted, common ones first)
 COMMON_TIMEZONES = [
     "UTC",
