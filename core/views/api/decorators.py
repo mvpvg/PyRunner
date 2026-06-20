@@ -104,6 +104,53 @@ def _extract_token(request):
     return request.headers.get("X-API-Key")
 
 
+# Loopback addresses the internal datastore endpoint will accept. The endpoint
+# is reached only over loopback (the worker calling the co-located web process),
+# never from off-host.
+_LOOPBACK_ADDRS = frozenset({"127.0.0.1", "::1"})
+
+
+def internal_datastore_token_required(view_func):
+    """
+    Auth gate for the INTERNAL datastore endpoint (Seam 1).
+
+    Distinct from ``api_token_required`` on purpose:
+    - It authenticates a stateless, signed per-run token (HMAC over SECRET_KEY,
+      see ``core.services.datastore_token``), not a DB-backed ``DataStoreAPIToken``.
+    - It is **loopback-only** (worker -> co-located web process).
+    - It is **NOT rate-limited**: scripts do unbounded local datastore I/O today
+      (raw SQLite), so a 60/min cap would be a behavior regression.
+
+    On success, attaches ``request.datastore_run`` (the decoded token payload).
+    """
+    @wraps(view_func)
+    def wrapper(request, *args, **kwargs):
+        # Lazy import keeps this module importable during the settings-time
+        # light-import pre-check (mirrors the rest of the codebase's discipline).
+        from core.services.datastore_token import verify_datastore_token
+
+        remote_addr = request.META.get("REMOTE_ADDR", "")
+        if remote_addr not in _LOOPBACK_ADDRS:
+            logger.warning("Internal datastore request from non-loopback %s", remote_addr)
+            return JsonResponse(
+                {"error": {"code": "FORBIDDEN", "message": "Internal endpoint is loopback-only"}},
+                status=403,
+            )
+
+        token = _extract_token(request)
+        payload = verify_datastore_token(token)
+        if not payload:
+            return JsonResponse(
+                {"error": {"code": "UNAUTHORIZED", "message": "Invalid or expired datastore token"}},
+                status=401,
+            )
+
+        request.datastore_run = payload
+        return view_func(request, *args, **kwargs)
+
+    return wrapper
+
+
 def add_cors_headers(response):
     """
     Add CORS headers to API response.

@@ -47,6 +47,10 @@ urlpatterns = [
     path("cpanel/", include("core.urls.cpanel")),
     # REST API endpoints (token auth required)
     path("api/v1/", include("core.urls.api")),
+    # Internal loopback-only datastore API (Seam 1). Signed per-run token auth;
+    # exempt from SSL redirect + setup gate (see settings). Inert in Phase A —
+    # the script helper still uses SQLite directly until the Stage 2 cutover.
+    path("internal/", include("core.urls.internal")),
     # Public webhook endpoint (no auth required)
     path("webhook/<str:token>/", webhook_trigger_view, name="webhook_trigger"),
     path("", lambda request: redirect("auth:login")),

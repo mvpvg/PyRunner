@@ -35,7 +35,16 @@ SECRET_KEY = os.environ["SECRET_KEY"]
 # Defaults to False for security - set DEBUG=True explicitly for development
 DEBUG = os.environ.get("DEBUG", "False").lower() == "true"
 
-ALLOWED_HOSTS = os.environ.get("ALLOWED_HOSTS", "localhost,127.0.0.1").split(",")
+ALLOWED_HOSTS = [h.strip() for h in os.environ.get("ALLOWED_HOSTS", "localhost,127.0.0.1").split(",") if h.strip()]
+
+# Always accept loopback hosts, regardless of the operator's ALLOWED_HOSTS. The
+# in-container healthcheck already calls http://localhost:8000/, and Seam 1's
+# internal datastore endpoint is reached over loopback by the worker — neither
+# should break when an operator narrows ALLOWED_HOSTS to their public domain.
+# Purely additive: it only ever widens the allow-list.
+for _loopback_host in ("localhost", "127.0.0.1", "[::1]"):
+    if _loopback_host not in ALLOWED_HOSTS:
+        ALLOWED_HOSTS.append(_loopback_host)
 
 
 # Application definition
@@ -485,6 +494,11 @@ if not DEBUG:
     # HTTPS/SSL Settings
     SECURE_SSL_REDIRECT = os.environ.get("SECURE_SSL_REDIRECT", "True").lower() == "true"
     SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+
+    # Never 301 the internal loopback datastore endpoint (Seam 1) to https — the
+    # worker calls it over plain-http loopback and there is no TLS listener
+    # there. Matched (regex) against request.path without the leading slash.
+    SECURE_REDIRECT_EXEMPT = [r"^internal/"]
 
     # HSTS - HTTP Strict Transport Security
     # Start with a shorter duration, increase to 31536000 (1 year) once confirmed working

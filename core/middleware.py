@@ -24,6 +24,9 @@ class SetupWizardMiddleware:
     STATIC_ALLOWED_PREFIXES = [
         "/setup/",
         "/static/",
+        # Seam 1 internal datastore endpoint: loopback-only, token-authed, must
+        # never be 302'd to /setup/ during a transient is_setup_needed() window.
+        "/internal/",
     ]
 
     def __init__(self, get_response):
