@@ -8,7 +8,6 @@ It is designed to be called from django-q2 async tasks.
 import json
 import logging
 import os
-import signal
 import subprocess
 import tempfile
 import traceback
@@ -17,6 +16,12 @@ from pathlib import Path
 from django.conf import settings
 from django.utils import timezone
 
+from core.executor_backends import RunSpec, get_run_backend
+
+# Re-exported so ``from core.executor import _kill_process_tree`` keeps working
+# (TaskService.force_stop_task imports it). The implementation now lives with
+# the local backend; force-stop stays pid-based for the local backend.
+from core.executor_backends.local import kill_process_tree as _kill_process_tree
 from core.models import Run, Secret
 from core.services import ClaudeService, EncryptionService
 
@@ -24,37 +29,6 @@ logger = logging.getLogger(__name__)
 
 # Maximum output size (1MB) to prevent database bloat
 MAX_OUTPUT_BYTES = 1_000_000
-
-
-def _kill_process_tree(pid: int) -> None:
-    """
-    Kill a script job's entire process tree.
-
-    This targets *only* the child process the executor spawned (the user's
-    Python script and anything it spawned) — never the long-lived django-q
-    worker. The child is launched in its own process group/session (see
-    ``execute_run``) so the kill is isolated from the worker.
-
-    Args:
-        pid: PID of the spawned script subprocess (the process-group leader).
-    """
-    if not pid:
-        return
-    try:
-        if os.name == "nt":
-            # /T kills the whole tree (children too), /F forces it.
-            subprocess.run(
-                ["taskkill", "/F", "/T", "/PID", str(pid)],
-                capture_output=True,
-                check=False,
-            )
-        else:
-            # Child was started with start_new_session=True, so it leads its own
-            # process group; killing the group takes out the script + children.
-            os.killpg(os.getpgid(pid), signal.SIGKILL)
-    except (ProcessLookupError, OSError) as e:
-        # Process already gone (or PID reused/invalid) — nothing to do.
-        logger.warning(f"Could not kill process tree {pid}: {e}")
 
 
 def _get_secrets_env() -> dict:
@@ -335,57 +309,34 @@ def execute_run(run: Run, webhook_data: dict | None = None) -> None:
                 if claude_env.get(cred_key):
                     secrets[cred_key] = claude_env[cred_key]
 
-            # Launch the script in its own process group/session so the web
-            # process can later kill the whole job tree (force stop / timeout)
-            # without touching the django-q worker that spawned it.
-            popen_kwargs = {
-                "stdout": subprocess.PIPE,
-                "stderr": subprocess.PIPE,
-                "cwd": str(workdir),
-                "text": True,
-                "encoding": "utf-8",
-                "errors": "replace",
-                "env": script_env,
-            }
-            if os.name == "nt":
-                # CREATE_NO_WINDOW: no console popup. CREATE_NEW_PROCESS_GROUP:
-                # isolate the child so signals/kills don't reach the worker.
-                popen_kwargs["creationflags"] = (
-                    subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
-                )
-            else:
-                # Child becomes the leader of a new session/process group.
-                popen_kwargs["start_new_session"] = True
-
-            proc = subprocess.Popen(cmd, **popen_kwargs)
+            # Hand the prepared command to the configured RunBackend. The local
+            # backend (default) launches the script in its own process group/
+            # session so the web process can later kill the whole job tree
+            # (force stop / timeout) without touching the django-q worker. The
+            # Run lifecycle below — pid record, masking, truncation, status
+            # mapping, the cancel-safe save — stays in core.
+            backend = get_run_backend()
+            spec = RunSpec(
+                cmd=cmd,
+                env=script_env,
+                cwd=str(workdir),
+                timeout=run.script.timeout_seconds,
+            )
+            handle = backend.start(spec)
 
             # Record the PID so the web process can kill this exact job tree.
-            run.pid = proc.pid
+            run.pid = handle.pid
             run.save(update_fields=["pid"])
 
-            try:
-                stdout, stderr = proc.communicate(timeout=run.script.timeout_seconds)
-                returncode = proc.returncode
+            result = backend.wait(handle, spec.timeout)
 
-                # Process results - mask secrets in output
-                run.stdout = _truncate_output(_mask_secrets_in_output(stdout, secrets))
-                run.stderr = _truncate_output(_mask_secrets_in_output(stderr, secrets))
-                run.exit_code = returncode
-                run.status = (
-                    Run.Status.SUCCESS if returncode == 0 else Run.Status.FAILED
-                )
-
-            except subprocess.TimeoutExpired:
-                # Kill the whole job tree (not just the immediate child), then
-                # drain whatever output was buffered before the kill.
-                _kill_process_tree(proc.pid)
-                stdout, stderr = proc.communicate()
+            if result.timed_out:
                 run.status = Run.Status.TIMEOUT
                 run.stdout = _truncate_output(
-                    _mask_secrets_in_output(stdout or "", secrets)
+                    _mask_secrets_in_output(result.stdout or "", secrets)
                 )
                 run.stderr = _truncate_output(
-                    _mask_secrets_in_output(stderr or "", secrets)
+                    _mask_secrets_in_output(result.stderr or "", secrets)
                 )
                 if run.stderr:
                     run.stderr += "\n\n[TIMEOUT: Script exceeded maximum execution time]"
@@ -396,6 +347,14 @@ def execute_run(run: Run, webhook_data: dict | None = None) -> None:
                 run.exit_code = -1
                 logger.warning(
                     f"Run {run.id} timed out after {run.script.timeout_seconds}s"
+                )
+            else:
+                # Process results - mask secrets in output
+                run.stdout = _truncate_output(_mask_secrets_in_output(result.stdout, secrets))
+                run.stderr = _truncate_output(_mask_secrets_in_output(result.stderr, secrets))
+                run.exit_code = result.exit_code
+                run.status = (
+                    Run.Status.SUCCESS if result.exit_code == 0 else Run.Status.FAILED
                 )
 
         except subprocess.SubprocessError as e:
@@ -515,35 +474,26 @@ def run_in_environment(
         if env:
             run_env.update({k: str(v) for k, v in env.items()})
 
-        popen_kwargs = {
-            "stdout": subprocess.PIPE,
-            "stderr": subprocess.PIPE,
-            "cwd": str(cwd) if cwd else str(workdir),
-            "text": True,
-            "encoding": "utf-8",
-            "errors": "replace",
-            "env": run_env,
-        }
-        if os.name == "nt":
-            popen_kwargs["creationflags"] = (
-                subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
-            )
-        else:
-            popen_kwargs["start_new_session"] = True
-
-        proc = subprocess.Popen(cmd, **popen_kwargs)
-        try:
-            stdout, stderr = proc.communicate(timeout=timeout)
-            return (
-                proc.returncode,
-                _truncate_output(stdout or ""),
-                _truncate_output(stderr or ""),
-            )
-        except subprocess.TimeoutExpired:
-            _kill_process_tree(proc.pid)
-            stdout, stderr = proc.communicate()
-            stderr = (stderr or "") + f"\n\n[TIMEOUT: exceeded {timeout}s]"
-            return -1, _truncate_output(stdout or ""), _truncate_output(stderr)
+        # Same single execution path as execute_run: the configured backend
+        # spawns in an isolated process group/session and kills the tree on
+        # timeout. No Run row here — plugin compute just gets (code, out, err).
+        backend = get_run_backend()
+        spec = RunSpec(
+            cmd=cmd,
+            env=run_env,
+            cwd=str(cwd) if cwd else str(workdir),
+            timeout=timeout,
+        )
+        handle = backend.start(spec)
+        result = backend.wait(handle, spec.timeout)
+        if result.timed_out:
+            stderr = (result.stderr or "") + f"\n\n[TIMEOUT: exceeded {timeout}s]"
+            return -1, _truncate_output(result.stdout or ""), _truncate_output(stderr)
+        return (
+            result.exit_code,
+            _truncate_output(result.stdout or ""),
+            _truncate_output(result.stderr or ""),
+        )
     finally:
         if temp_file:
             try:
