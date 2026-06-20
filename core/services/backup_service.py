@@ -25,6 +25,8 @@ from core.models import (
     ScriptSchedule,
     Secret,
     User,
+    Workspace,
+    WorkspaceMembership,
 )
 from core.services.encryption_service import EncryptionService
 from core.services.schedule_service import ScheduleService
@@ -36,7 +38,12 @@ class BackupService:
     Service for creating and restoring PyRunner backups.
     """
 
-    BACKUP_VERSION = "1.1.0"
+    # 1.2.0 — tenancy: a ``workspaces`` array + ``workspace_id`` on each scoped
+    # row, so a whole-instance restore round-trips workspaces instead of
+    # collapsing every tenant into the default (tenancy Stage 5). Backward
+    # compatible: a pre-1.2.0 backup has neither, and restore maps its rows to the
+    # default workspace.
+    BACKUP_VERSION = "1.2.0"
     MAX_BACKUP_SIZE_MB = 100
 
     # Backup format constants
@@ -78,6 +85,7 @@ class BackupService:
                 "created_by_email": created_by_user.email if created_by_user else None,
             },
             "global_settings": cls._export_global_settings(),
+            "workspaces": cls._export_workspaces(),
             "environments": cls._export_environments(),
             "users": cls._export_users(),
             "scripts": cls._export_scripts(),
@@ -129,6 +137,20 @@ class BackupService:
         }
 
     @classmethod
+    def _export_workspaces(cls) -> List[dict]:
+        """Export workspaces so a restore can round-trip tenancy (Stage 5)."""
+        workspaces = []
+        for ws in Workspace.objects.all().order_by("created_at"):
+            workspaces.append({
+                "id": str(ws.id),
+                "name": ws.name,
+                "is_default": ws.is_default,
+                "created_at": cls._serialize_datetime(ws.created_at),
+                "updated_at": cls._serialize_datetime(ws.updated_at),
+            })
+        return workspaces
+
+    @classmethod
     def _export_environments(cls) -> List[dict]:
         """Export all environments to list of dicts."""
         environments = []
@@ -138,6 +160,7 @@ class BackupService:
                 "name": env.name,
                 "description": env.description,
                 "path": env.path,
+                "workspace_id": str(env.workspace_id) if env.workspace_id else None,
                 "python_version": env.python_version,
                 "requirements": env.requirements,
                 "is_default": env.is_default,
@@ -174,6 +197,7 @@ class BackupService:
                 "description": script.description,
                 "code": script.code,
                 "environment_id": str(script.environment.id),
+                "workspace_id": str(script.workspace_id) if script.workspace_id else None,
                 "timeout_seconds": script.timeout_seconds,
                 "is_enabled": script.is_enabled,
                 "webhook_token": script.webhook_token,
@@ -197,6 +221,7 @@ class BackupService:
             schedules.append({
                 "id": str(schedule.id),
                 "script_id": str(schedule.script.id),
+                "workspace_id": str(schedule.workspace_id) if schedule.workspace_id else None,
                 "run_mode": schedule.run_mode,
                 "interval_minutes": schedule.interval_minutes,
                 "daily_times": schedule.daily_times,
@@ -232,6 +257,7 @@ class BackupService:
             secrets.append({
                 "id": str(secret.id),
                 "key": secret.key,
+                "workspace_id": str(secret.workspace_id) if secret.workspace_id else None,
                 "encrypted_value": secret.encrypted_value,
                 "description": secret.description,
                 "created_at": cls._serialize_datetime(secret.created_at),
@@ -252,6 +278,7 @@ class BackupService:
             runs.append({
                 "id": str(run.id),
                 "script_id": str(run.script.id),
+                "workspace_id": str(run.workspace_id) if run.workspace_id else None,
                 "status": run.status,
                 "exit_code": run.exit_code,
                 "stdout": run.stdout,
@@ -303,6 +330,7 @@ class BackupService:
             datastores.append({
                 "id": str(ds.id),
                 "name": ds.name,
+                "workspace_id": str(ds.workspace_id) if ds.workspace_id else None,
                 "description": ds.description,
                 "created_at": cls._serialize_datetime(ds.created_at),
                 "updated_at": cls._serialize_datetime(ds.updated_at),
@@ -547,6 +575,7 @@ class BackupService:
         datastores = backup_data.get("datastores", [])
         counts = {
             "scripts": len(backup_data.get("scripts", [])),
+            "workspaces": len(backup_data.get("workspaces", [])),
             "environments": len(backup_data.get("environments", [])),
             "secrets": len(backup_data.get("secrets", [])),
             "runs": len(backup_data.get("runs", [])),
@@ -612,18 +641,33 @@ class BackupService:
             # Import data in dependency order
             cls._import_global_settings(backup_data.get("global_settings", {}))
 
+            # Tenancy Stage 5: rebuild the workspace topology FIRST so every scoped
+            # row can be re-associated. The source's default workspace maps to THIS
+            # instance's default (a single default always exists); non-default
+            # source workspaces are recreated (UUID preserved). A pre-1.2.0 backup
+            # has no workspaces/workspace_id → every row falls back to the default
+            # (no tenant collapse to worry about — there was only one tenant).
+            default_ws = Workspace.get_default()
+            if default_ws is None:
+                default_ws = Workspace.objects.create(
+                    name="Default Workspace", is_default=True
+                )
+            ws_map = cls._import_workspaces(
+                backup_data.get("workspaces", []), default_ws, current_user
+            )
+
             user_map = cls._import_users(backup_data.get("users", []), current_user)
-            env_map = cls._import_environments(backup_data.get("environments", []), user_map, current_user)
-            cls._import_secrets(backup_data.get("secrets", []), user_map, current_user)
-            script_map = cls._import_scripts(backup_data.get("scripts", []), env_map, user_map, current_user)
-            cls._import_schedules(backup_data.get("script_schedules", []), script_map, user_map, current_user)
+            env_map = cls._import_environments(backup_data.get("environments", []), user_map, current_user, ws_map, default_ws)
+            cls._import_secrets(backup_data.get("secrets", []), user_map, current_user, ws_map, default_ws)
+            script_map = cls._import_scripts(backup_data.get("scripts", []), env_map, user_map, current_user, ws_map, default_ws)
+            cls._import_schedules(backup_data.get("script_schedules", []), script_map, user_map, current_user, ws_map, default_ws)
             cls._import_schedule_history(backup_data.get("schedule_history", []), user_map, current_user)
 
             if restore_runs:
-                cls._import_runs(backup_data.get("runs", []), script_map, user_map, current_user)
+                cls._import_runs(backup_data.get("runs", []), script_map, user_map, current_user, ws_map, default_ws)
 
             cls._import_package_operations(backup_data.get("package_operations", []), env_map, user_map, current_user)
-            ds_map = cls._import_datastores(backup_data.get("datastores", []), user_map, current_user)
+            ds_map = cls._import_datastores(backup_data.get("datastores", []), user_map, current_user, ws_map, default_ws)
 
             # Regenerate django-q2 schedules
             schedules_created = cls._regenerate_all_schedules()
@@ -669,6 +713,46 @@ class BackupService:
         settings_obj.save()
 
     @classmethod
+    def _import_workspaces(cls, workspaces_data: List[dict], default_ws, current_user) -> dict:
+        """Rebuild the workspace topology and map backup-ws-id → local Workspace.
+
+        The source's default workspace maps to this instance's default (keeping a
+        single default); each non-default source workspace is recreated with its
+        UUID preserved (reused if it already exists). The user performing the
+        restore is made an Owner of each recreated workspace so the restored
+        tenants are actually reachable (membership rows themselves are not part of
+        the whole-instance backup — see the simplified user import).
+        """
+        ws_map = {}
+        for w in workspaces_data:
+            old_id = w["id"]
+            if w.get("is_default"):
+                ws_map[old_id] = default_ws  # source default → local default
+                continue
+            ws = Workspace.objects.filter(pk=old_id).first()
+            if ws is None:
+                ws = Workspace.objects.create(
+                    id=old_id,
+                    name=w.get("name", "Workspace"),
+                    is_default=False,
+                    created_at=cls._deserialize_datetime(w.get("created_at")),
+                    updated_at=cls._deserialize_datetime(w.get("updated_at")),
+                )
+                if current_user is not None:
+                    WorkspaceMembership.ensure(
+                        current_user, ws, role=WorkspaceMembership.ROLE_OWNER
+                    )
+            ws_map[old_id] = ws
+        return ws_map
+
+    @classmethod
+    def _resolve_workspace(cls, workspace_id, ws_map: dict, default_ws):
+        """Map a backed-up workspace_id to a local Workspace (default fallback)."""
+        if not workspace_id:
+            return default_ws
+        return ws_map.get(workspace_id, default_ws)
+
+    @classmethod
     def _import_users(cls, users_data: List[dict], current_user) -> dict:
         """
         Import users and create email->user mapping.
@@ -692,7 +776,7 @@ class BackupService:
         return user_map
 
     @classmethod
-    def _import_environments(cls, envs_data: List[dict], user_map: dict, current_user) -> dict:
+    def _import_environments(cls, envs_data: List[dict], user_map: dict, current_user, ws_map: dict, default_ws) -> dict:
         """
         Import environments.
 
@@ -710,6 +794,7 @@ class BackupService:
                 name=env_data["name"],
                 description=env_data.get("description", ""),
                 path=env_data["path"],
+                workspace=cls._resolve_workspace(env_data.get("workspace_id"), ws_map, default_ws),
                 python_version=env_data.get("python_version", ""),
                 requirements=env_data.get("requirements", ""),
                 is_default=False,  # Will set default after all are created
@@ -728,7 +813,7 @@ class BackupService:
         return env_map
 
     @classmethod
-    def _import_secrets(cls, secrets_data: List[dict], user_map: dict, current_user) -> None:
+    def _import_secrets(cls, secrets_data: List[dict], user_map: dict, current_user, ws_map: dict, default_ws) -> None:
         """Import secrets (encrypted values unchanged)."""
         for secret_data in secrets_data:
             created_by = user_map.get(secret_data.get("created_by_email"), current_user)
@@ -736,6 +821,7 @@ class BackupService:
             Secret.objects.create(
                 id=secret_data["id"],  # Preserve UUID
                 key=secret_data["key"],
+                workspace=cls._resolve_workspace(secret_data.get("workspace_id"), ws_map, default_ws),
                 encrypted_value=secret_data["encrypted_value"],
                 description=secret_data.get("description", ""),
                 created_at=cls._deserialize_datetime(secret_data.get("created_at")),
@@ -744,7 +830,7 @@ class BackupService:
             )
 
     @classmethod
-    def _import_scripts(cls, scripts_data: List[dict], env_map: dict, user_map: dict, current_user) -> dict:
+    def _import_scripts(cls, scripts_data: List[dict], env_map: dict, user_map: dict, current_user, ws_map: dict, default_ws) -> dict:
         """Import scripts with proper foreign key mapping."""
         script_map = {}
 
@@ -762,6 +848,7 @@ class BackupService:
                 description=script_data.get("description", ""),
                 code=script_data["code"],
                 environment=env,
+                workspace=cls._resolve_workspace(script_data.get("workspace_id"), ws_map, default_ws),
                 timeout_seconds=script_data.get("timeout_seconds", 300),
                 is_enabled=script_data.get("is_enabled", False),
                 webhook_token=script_data.get("webhook_token"),
@@ -780,7 +867,7 @@ class BackupService:
         return script_map
 
     @classmethod
-    def _import_schedules(cls, schedules_data: List[dict], script_map: dict, user_map: dict, current_user) -> None:
+    def _import_schedules(cls, schedules_data: List[dict], script_map: dict, user_map: dict, current_user, ws_map: dict, default_ws) -> None:
         """Import schedules (q_schedule_ids will be regenerated later)."""
         for schedule_data in schedules_data:
             script = script_map.get(schedule_data["script_id"])
@@ -792,6 +879,7 @@ class BackupService:
             ScriptSchedule.objects.create(
                 id=schedule_data["id"],  # Preserve UUID
                 script=script,
+                workspace=cls._resolve_workspace(schedule_data.get("workspace_id"), ws_map, default_ws),
                 run_mode=schedule_data.get("run_mode", "manual"),
                 interval_minutes=schedule_data.get("interval_minutes"),
                 daily_times=schedule_data.get("daily_times", []),
@@ -827,7 +915,7 @@ class BackupService:
             )
 
     @classmethod
-    def _import_runs(cls, runs_data: List[dict], script_map: dict, user_map: dict, current_user) -> None:
+    def _import_runs(cls, runs_data: List[dict], script_map: dict, user_map: dict, current_user, ws_map: dict, default_ws) -> None:
         """Import runs."""
         for run_data in runs_data:
             script = script_map.get(run_data["script_id"])
@@ -839,6 +927,7 @@ class BackupService:
             Run.objects.create(
                 id=run_data["id"],  # Preserve UUID
                 script=script,
+                workspace=cls._resolve_workspace(run_data.get("workspace_id"), ws_map, default_ws),
                 status=run_data["status"],
                 exit_code=run_data.get("exit_code"),
                 stdout=run_data.get("stdout", ""),
@@ -876,7 +965,7 @@ class BackupService:
             )
 
     @classmethod
-    def _import_datastores(cls, datastores_data: List[dict], user_map: dict, current_user) -> dict:
+    def _import_datastores(cls, datastores_data: List[dict], user_map: dict, current_user, ws_map: dict, default_ws) -> dict:
         """Import DataStores and their entries."""
         ds_map = {}
 
@@ -887,6 +976,7 @@ class BackupService:
             datastore = DataStore.objects.create(
                 id=old_id,  # Preserve UUID
                 name=ds_data["name"],
+                workspace=cls._resolve_workspace(ds_data.get("workspace_id"), ws_map, default_ws),
                 description=ds_data.get("description", ""),
                 created_at=cls._deserialize_datetime(ds_data.get("created_at")),
                 updated_at=cls._deserialize_datetime(ds_data.get("updated_at")),
