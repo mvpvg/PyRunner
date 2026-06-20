@@ -270,21 +270,43 @@ def _run_coro(coro):
 def _record_usage(result: "ClaudeResult", source: str = "script") -> None:
     """Best-effort: record one usage row into the PyRunner DB.
 
-    Writes directly via sqlite3 (same approach as DataStore), attributed to the
-    current run/script via env vars injected by the executor. Never raises --
-    usage tracking must never break a user's script.
+    Attributed to the current run/script via env vars injected by the executor.
+    On SQLite deployments it writes the DB file directly (same approach as the
+    DataStore helper); on Postgres (no local DB file) it posts to PyRunner's
+    internal loopback API. Never raises -- usage tracking must never break a
+    user's script.
     """
+    payload = {
+        "script_id": os.environ.get("PYRUNNER_SCRIPT_ID") or None,
+        "run_id": os.environ.get("PYRUNNER_RUN_ID") or None,
+        "script_name": os.environ.get("PYRUNNER_SCRIPT_NAME", "") or "",
+        "source": source,
+        "model": result.model or "",
+        "input_tokens": int(result.input_tokens or 0),
+        "output_tokens": int(result.output_tokens or 0),
+        "cache_creation_tokens": int(result.cache_creation_tokens or 0),
+        "cache_read_tokens": int(result.cache_read_tokens or 0),
+        "num_turns": int(result.num_turns or 0),
+        "duration_ms": int(result.duration_ms or 0),
+        "cost_usd": result.cost_usd,
+    }
+
     db_path = os.environ.get("PYRUNNER_DB_PATH")
-    if not db_path:
+    if db_path:
+        _record_usage_sqlite(db_path, payload)
         return
+
+    api_url = os.environ.get("PYRUNNER_INTERNAL_URL")
+    api_token = os.environ.get("PYRUNNER_INTERNAL_TOKEN")
+    if api_url and api_token:
+        _record_usage_api(api_url, api_token, payload)
+
+
+def _record_usage_sqlite(db_path: str, payload: dict) -> None:
+    """Write one usage row directly to the SQLite file. Best-effort."""
     try:
         import sqlite3
         import uuid as _uuid
-
-        row_id = _uuid.uuid4().hex
-        script_id = os.environ.get("PYRUNNER_SCRIPT_ID") or None
-        run_id = os.environ.get("PYRUNNER_RUN_ID") or None
-        script_name = os.environ.get("PYRUNNER_SCRIPT_NAME", "") or ""
 
         conn = sqlite3.connect(db_path, timeout=30)
         try:
@@ -298,24 +320,46 @@ def _record_usage(result: "ClaudeResult", source: str = "script") -> None:
                 ) VALUES (?, datetime('now'), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    row_id,
-                    script_id,
-                    run_id,
-                    script_name,
-                    source,
-                    result.model or "",
-                    int(result.input_tokens or 0),
-                    int(result.output_tokens or 0),
-                    int(result.cache_creation_tokens or 0),
-                    int(result.cache_read_tokens or 0),
-                    int(result.num_turns or 0),
-                    int(result.duration_ms or 0),
-                    result.cost_usd,
+                    _uuid.uuid4().hex,
+                    payload["script_id"],
+                    payload["run_id"],
+                    payload["script_name"],
+                    payload["source"],
+                    payload["model"],
+                    payload["input_tokens"],
+                    payload["output_tokens"],
+                    payload["cache_creation_tokens"],
+                    payload["cache_read_tokens"],
+                    payload["num_turns"],
+                    payload["duration_ms"],
+                    payload["cost_usd"],
                 ),
             )
             conn.commit()
         finally:
             conn.close()
+    except Exception:
+        # Telemetry is best-effort; swallow everything.
+        pass
+
+
+def _record_usage_api(base_url: str, token: str, payload: dict) -> None:
+    """POST one usage row to PyRunner's internal loopback API. Best-effort."""
+    try:
+        import json as _json
+        import urllib.request
+
+        req = urllib.request.Request(
+            f"{base_url.rstrip('/')}/internal/claude-usage",
+            data=_json.dumps(payload).encode("utf-8"),
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            resp.read()
     except Exception:
         # Telemetry is best-effort; swallow everything.
         pass

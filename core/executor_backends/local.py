@@ -50,6 +50,25 @@ def kill_process_tree(pid: int) -> None:
         logger.warning(f"Could not kill process tree {pid}: {e}")
 
 
+def _make_rlimit_preexec(limits: dict):
+    """Build a posix ``preexec_fn`` that applies resource caps in the child."""
+
+    def _apply():
+        import resource
+
+        mem = limits.get("memory_bytes")
+        if mem:
+            resource.setrlimit(resource.RLIMIT_AS, (mem, mem))
+        cpu = limits.get("cpu_seconds")
+        if cpu:
+            resource.setrlimit(resource.RLIMIT_CPU, (cpu, cpu))
+        nproc = limits.get("nproc")
+        if nproc:
+            resource.setrlimit(resource.RLIMIT_NPROC, (nproc, nproc))
+
+    return _apply
+
+
 class LocalSubprocessBackend(RunBackend):
     """Run the command as a local subprocess in the PyRunner container."""
 
@@ -74,6 +93,10 @@ class LocalSubprocessBackend(RunBackend):
         else:
             # Child becomes the leader of a new session/process group.
             popen_kwargs["start_new_session"] = True
+            # Optional resource caps, applied in the child before exec (posix
+            # only). Off unless configured, so the default is unchanged.
+            if spec.limits:
+                popen_kwargs["preexec_fn"] = _make_rlimit_preexec(spec.limits)
 
         proc = subprocess.Popen(spec.cmd, **popen_kwargs)
         return RunHandle(pid=proc.pid, native=proc)

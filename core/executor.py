@@ -77,6 +77,11 @@ def _build_script_environment(
     # Start with system environment
     env = os.environ.copy()
 
+    # Hardening: drop PyRunner's own infra secrets so they never leak into a
+    # user's run (a user Secret of the same name still injects below).
+    for _denied in settings.PYRUNNER_RUN_ENV_DENYLIST:
+        env.pop(_denied, None)
+
     # Add secrets (overriding any existing vars with same name)
     secrets = _get_secrets_env()
     env.update(secrets)
@@ -112,9 +117,23 @@ def _build_script_environment(
                 env["PYRUNNER_SCRIPT_ID"] = run.script.id.hex
                 env["PYRUNNER_SCRIPT_NAME"] = run.script.name
 
-    # Add DataStore support
-    # Set the database path for the pyrunner_datastore module
-    env["PYRUNNER_DB_PATH"] = str(settings.DATABASES["default"]["NAME"])
+    # DataStore + Claude-usage access for the script helpers.
+    #
+    # On SQLite (the default) the helpers read the DB file directly via
+    # PYRUNNER_DB_PATH — byte-for-byte with before, and with no dependency on
+    # the web tier being up. On any other engine (Postgres) there is no local DB
+    # file, so the helpers go through the internal loopback API instead,
+    # authenticated by a signed per-run token. The token is only available with
+    # a run context (it is keyed to run.id).
+    from django.db import connection as _db_connection
+
+    if _db_connection.vendor == "sqlite":
+        env["PYRUNNER_DB_PATH"] = str(settings.DATABASES["default"]["NAME"])
+    if run is not None:
+        from core.services.datastore_token import mint_datastore_token
+
+        env["PYRUNNER_INTERNAL_URL"] = settings.PYRUNNER_INTERNAL_BASE_URL
+        env["PYRUNNER_INTERNAL_TOKEN"] = mint_datastore_token(run.id)
 
     # Add script_helpers to PYTHONPATH so scripts can import pyrunner_datastore
     helpers_path = str(Path(settings.BASE_DIR) / "core" / "script_helpers")
@@ -221,6 +240,28 @@ def _validate_environment(run: Run) -> str:
     return python_path
 
 
+def _run_resource_limits() -> dict | None:
+    """Build the posix resource-cap dict from settings, or None if all off.
+
+    Off by default (every setting 0), so the spec carries no limits and behavior
+    is unchanged. When configured, the local backend applies these via
+    ``resource.setrlimit`` in a posix ``preexec_fn`` (no-op on Windows).
+    """
+    mem = settings.PYRUNNER_RUN_RLIMIT_MEMORY_MB
+    cpu = settings.PYRUNNER_RUN_RLIMIT_CPU_SECONDS
+    nproc = settings.PYRUNNER_RUN_RLIMIT_NPROC
+    if not (mem or cpu or nproc):
+        return None
+    limits = {}
+    if mem:
+        limits["memory_bytes"] = mem * 1024 * 1024
+    if cpu:
+        limits["cpu_seconds"] = cpu
+    if nproc:
+        limits["nproc"] = nproc
+    return limits
+
+
 def execute_run(run: Run, webhook_data: dict | None = None) -> None:
     """
     Execute a script run and update the Run record with results.
@@ -321,6 +362,7 @@ def execute_run(run: Run, webhook_data: dict | None = None) -> None:
                 env=script_env,
                 cwd=str(workdir),
                 timeout=run.script.timeout_seconds,
+                limits=_run_resource_limits(),
             )
             handle = backend.start(spec)
 

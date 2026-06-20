@@ -11,7 +11,12 @@ and SetupWizardMiddleware.STATIC_ALLOWED_PREFIXES) so a loopback call is never
 
 from django.urls import path
 
-from core.views.api.datastore_internal import resolve_store, entries, entry
+from core.views.api.datastore_internal import (
+    entries,
+    entry,
+    record_claude_usage,
+    resolve_store,
+)
 
 app_name = "internal"
 
@@ -19,4 +24,5 @@ urlpatterns = [
     path("datastores/<str:name>", resolve_store, name="resolve_store"),
     path("datastores/<str:name>/entries", entries, name="entries"),
     path("datastores/<str:name>/entry", entry, name="entry"),
+    path("claude-usage", record_claude_usage, name="claude_usage"),
 ]

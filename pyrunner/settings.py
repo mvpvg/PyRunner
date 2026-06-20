@@ -110,15 +110,30 @@ WSGI_APPLICATION = "pyrunner.wsgi.application"
 # Database
 # https://docs.djangoproject.com/en/6.0/ref/settings/#databases
 
-DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.sqlite3",
-        "NAME": BASE_DIR / "data" / "db.sqlite3",
-        "OPTIONS": {
-            "timeout": 30,  # Wait up to 30 seconds for database lock
-        },
+# SQLite is the zero-config default. Set DATABASE_URL (e.g.
+# postgres://user:pass@host:5432/pyrunner) to run on Postgres instead — that one
+# env var is the entire engine switch. Unset => SQLite, byte-for-byte as before.
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+if DATABASE_URL:
+    import dj_database_url
+
+    DATABASES = {
+        "default": dj_database_url.parse(
+            DATABASE_URL,
+            conn_max_age=int(os.environ.get("DB_CONN_MAX_AGE", "600")),
+            conn_health_checks=True,
+        ),
     }
-}
+else:
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.sqlite3",
+            "NAME": BASE_DIR / "data" / "db.sqlite3",
+            "OPTIONS": {
+                "timeout": 30,  # Wait up to 30 seconds for database lock
+            },
+        }
+    }
 
 
 # Enable SQLite WAL mode for better concurrency in multi-process environments
@@ -162,22 +177,40 @@ def _plugin_slug_ok(slug):
 
 
 def _active_plugin_slugs():
-    """Active plugin slugs, read straight from sqlite at import time.
+    """Active plugin slugs, read from the DB at import time (before apps load).
 
-    Mirrors `_get_q_cluster_config()`'s "read the DB before Django is ready"
-    pattern, but with a read-only connection so it can never create or lock the
-    database. Fully guarded: a missing table (pre-migrate), an absent/locked db,
-    or any other error yields an empty list — never an exception.
+    Engine-aware: a read-only sqlite connection on SQLite (can never create or
+    lock the file), psycopg on Postgres. Fully guarded: a missing table
+    (pre-migrate), an absent/locked/unreachable db, or any other error yields an
+    empty list — never an exception (so a DB hiccup can never stop the boot).
     """
-    db_path = DATABASES["default"]["NAME"]
+    db = DATABASES["default"]
     try:
-        con = _sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-        try:
-            rows = con.execute(
-                "SELECT slug FROM plugins WHERE status = 'active'"
-            ).fetchall()
-        finally:
-            con.close()
+        if "postgresql" in db.get("ENGINE", ""):
+            import psycopg
+
+            conn = psycopg.connect(
+                dbname=db.get("NAME") or None,
+                user=db.get("USER") or None,
+                password=db.get("PASSWORD") or None,
+                host=db.get("HOST") or None,
+                port=db.get("PORT") or None,
+                connect_timeout=5,
+            )
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT slug FROM plugins WHERE status = 'active'")
+                    rows = cur.fetchall()
+            finally:
+                conn.close()
+        else:
+            con = _sqlite3.connect(f"file:{db['NAME']}?mode=ro", uri=True)
+            try:
+                rows = con.execute(
+                    "SELECT slug FROM plugins WHERE status = 'active'"
+                ).fetchall()
+            finally:
+                con.close()
     except Exception:
         return []
     return [r[0] for r in rows if _plugin_slug_ok(r[0])]
@@ -506,9 +539,13 @@ if not DEBUG:
     SECURE_HSTS_INCLUDE_SUBDOMAINS = os.environ.get("SECURE_HSTS_INCLUDE_SUBDOMAINS", "True").lower() == "true"
     SECURE_HSTS_PRELOAD = os.environ.get("SECURE_HSTS_PRELOAD", "False").lower() == "true"
 
-    # Cookie Security
-    SESSION_COOKIE_SECURE = True
-    CSRF_COOKIE_SECURE = True
+    # Cookie Security. Default True (secure) — correct for HTTPS and for an
+    # edge-TLS proxy (Coolify) where SECURE_PROXY_SSL_HEADER marks requests
+    # secure. Overridable to False for a genuine plain-http deployment (e.g. a
+    # local Docker run), where a Secure cookie would never be sent back and would
+    # silently log the user out on every request.
+    SESSION_COOKIE_SECURE = os.environ.get("SESSION_COOKIE_SECURE", "True").lower() == "true"
+    CSRF_COOKIE_SECURE = os.environ.get("CSRF_COOKIE_SECURE", "True").lower() == "true"
 
 # Always-on security settings (regardless of DEBUG)
 SECURE_CONTENT_TYPE_NOSNIFF = True
@@ -530,3 +567,27 @@ API_RATE_LIMIT = int(os.environ.get("API_RATE_LIMIT", "60"))
 # CORS settings for API endpoints
 # Set to "*" to allow all origins (suitable for self-hosted), or comma-separated origins
 API_CORS_ORIGINS = os.environ.get("API_CORS_ORIGINS", "*")
+
+# Base URL the worker uses to reach the internal loopback API (Seam 1 datastore
+# endpoint + Claude-usage recorder) when there is no local DB file (Postgres).
+# Derived from the actual gunicorn bind (PORT) so it is never a wrong hardcoded
+# port; overridable for unusual topologies. Loopback by design.
+PYRUNNER_INTERNAL_BASE_URL = os.environ.get(
+    "PYRUNNER_INTERNAL_BASE_URL", f"http://127.0.0.1:{os.environ.get('PORT', '8000')}"
+)
+
+# Per-run env hardening: PyRunner's own infra secrets are never copied into a
+# script's environment (scripts get their own values via the Secrets feature).
+PYRUNNER_RUN_ENV_DENYLIST = [
+    v.strip()
+    for v in os.environ.get(
+        "PYRUNNER_RUN_ENV_DENYLIST", "ENCRYPTION_KEY,SECRET_KEY,DATABASE_URL"
+    ).split(",")
+    if v.strip()
+]
+
+# Optional per-run resource limits (posix only; a no-op on Windows). 0 = off.
+# Applied via resource.setrlimit in the child before exec.
+PYRUNNER_RUN_RLIMIT_MEMORY_MB = int(os.environ.get("PYRUNNER_RUN_RLIMIT_MEMORY_MB", "0"))
+PYRUNNER_RUN_RLIMIT_CPU_SECONDS = int(os.environ.get("PYRUNNER_RUN_RLIMIT_CPU_SECONDS", "0"))
+PYRUNNER_RUN_RLIMIT_NPROC = int(os.environ.get("PYRUNNER_RUN_RLIMIT_NPROC", "0"))

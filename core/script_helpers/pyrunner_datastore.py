@@ -1,9 +1,17 @@
 """
 PyRunner DataStore API for scripts.
 
-This module provides a simple key-value data store interface backed by
-the PyRunner SQLite database. Data stores must be created through the
-PyRunner web interface before they can be used in scripts.
+This module provides a simple key-value data store interface. Data stores must
+be created through the PyRunner web interface before they can be used in scripts.
+
+The backend is chosen automatically from the environment PyRunner injects:
+- ``PYRUNNER_DB_PATH`` set (SQLite deployments) -> read the DB file directly.
+  This is the original, web-server-independent path, byte-for-byte unchanged.
+- otherwise ``PYRUNNER_INTERNAL_URL`` + ``PYRUNNER_INTERNAL_TOKEN`` (Postgres
+  deployments, where there is no local DB file) -> a small loopback HTTP call to
+  PyRunner's internal API, authenticated by a signed per-run token.
+
+Either way the surface below is identical, so scripts never change.
 
 Usage:
     from pyrunner_datastore import DataStore
@@ -41,13 +49,226 @@ Usage:
 import json
 import os
 import sqlite3
+import urllib.error
+import urllib.parse
+import urllib.request
 from typing import Any, Iterator, List, Optional, Tuple
+
+
+# ---------------------------------------------------------------------------
+# Backends
+# ---------------------------------------------------------------------------
+
+
+class _SqliteBackend:
+    """Direct SQLite access (original behavior; no web-server dependency)."""
+
+    def __init__(self, name: str, db_path: str):
+        self.name = name
+        self._db_path = db_path
+        self._store_id = self._get_store_id()
+
+    def _conn(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self._db_path)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _get_store_id(self) -> Optional[str]:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT id FROM datastores WHERE name = ?", (self.name,)
+            ).fetchone()
+            return row["id"] if row else None
+
+    def store_exists(self) -> bool:
+        return self._store_id is not None
+
+    def get(self, key: str) -> Any:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT value_json FROM datastore_entries "
+                "WHERE datastore_id = ? AND key = ?",
+                (self._store_id, key),
+            ).fetchone()
+            if row is None:
+                raise KeyError(key)
+            return json.loads(row["value_json"])
+
+    def set(self, key: str, value: Any) -> None:
+        value_json = json.dumps(value)
+        with self._conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO datastore_entries (id, datastore_id, key, value_json, created_at, updated_at)
+                VALUES (lower(hex(randomblob(16))), ?, ?, ?, datetime('now'), datetime('now'))
+                ON CONFLICT(datastore_id, key) DO UPDATE SET
+                    value_json = excluded.value_json,
+                    updated_at = datetime('now')
+                """,
+                (self._store_id, key, value_json),
+            )
+            conn.commit()
+
+    def delete(self, key: str) -> None:
+        with self._conn() as conn:
+            cursor = conn.execute(
+                "DELETE FROM datastore_entries WHERE datastore_id = ? AND key = ?",
+                (self._store_id, key),
+            )
+            conn.commit()
+            if cursor.rowcount == 0:
+                raise KeyError(key)
+
+    def contains(self, key: str) -> bool:
+        with self._conn() as conn:
+            return (
+                conn.execute(
+                    "SELECT 1 FROM datastore_entries WHERE datastore_id = ? AND key = ?",
+                    (self._store_id, key),
+                ).fetchone()
+                is not None
+            )
+
+    def count(self) -> int:
+        with self._conn() as conn:
+            return conn.execute(
+                "SELECT COUNT(*) as count FROM datastore_entries WHERE datastore_id = ?",
+                (self._store_id,),
+            ).fetchone()["count"]
+
+    def keys(self) -> List[str]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT key FROM datastore_entries WHERE datastore_id = ? ORDER BY key",
+                (self._store_id,),
+            ).fetchall()
+            return [r["key"] for r in rows]
+
+    def values(self) -> List[Any]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT value_json FROM datastore_entries WHERE datastore_id = ? ORDER BY key",
+                (self._store_id,),
+            ).fetchall()
+            return [json.loads(r["value_json"]) for r in rows]
+
+    def items(self) -> List[Tuple[str, Any]]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT key, value_json FROM datastore_entries WHERE datastore_id = ? ORDER BY key",
+                (self._store_id,),
+            ).fetchall()
+            return [(r["key"], json.loads(r["value_json"])) for r in rows]
+
+    def clear(self) -> int:
+        with self._conn() as conn:
+            cursor = conn.execute(
+                "DELETE FROM datastore_entries WHERE datastore_id = ?",
+                (self._store_id,),
+            )
+            conn.commit()
+            return cursor.rowcount
+
+
+class _ApiBackend:
+    """Loopback HTTP access to PyRunner's internal datastore API (stdlib only)."""
+
+    def __init__(self, name: str, base_url: str, token: str):
+        self.name = name
+        self._token = token
+        self._ds_url = f"{base_url.rstrip('/')}/internal/datastores/{urllib.parse.quote(name)}"
+
+    def _request(self, method: str, url: str, body: Any = None) -> Tuple[int, dict]:
+        data = None
+        headers = {"Authorization": f"Bearer {self._token}"}
+        if body is not None:
+            data = json.dumps(body).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        req = urllib.request.Request(url, data=data, method=method, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                raw = resp.read()
+                return resp.status, (json.loads(raw) if raw else {})
+        except urllib.error.HTTPError as e:
+            raw = e.read()
+            try:
+                payload = json.loads(raw) if raw else {}
+            except ValueError:
+                payload = {}
+            return e.code, payload
+
+    def _entry_url(self, key: str) -> str:
+        return f"{self._ds_url}/entry?key={urllib.parse.quote(str(key))}"
+
+    def store_exists(self) -> bool:
+        status, _ = self._request("GET", self._ds_url)
+        return status == 200
+
+    def get(self, key: str) -> Any:
+        status, payload = self._request("GET", self._entry_url(key))
+        if status == 404:
+            raise KeyError(key)
+        return payload["value"]
+
+    def set(self, key: str, value: Any) -> None:
+        self._request("PUT", f"{self._ds_url}/entry", body={"key": key, "value": value})
+
+    def delete(self, key: str) -> None:
+        status, _ = self._request("DELETE", self._entry_url(key))
+        if status == 404:
+            raise KeyError(key)
+
+    def contains(self, key: str) -> bool:
+        status, _ = self._request("GET", self._entry_url(key))
+        return status == 200
+
+    def _all(self) -> list:
+        _, payload = self._request("GET", f"{self._ds_url}/entries")
+        return payload.get("entries", [])
+
+    def count(self) -> int:
+        _, payload = self._request("GET", f"{self._ds_url}/entries")
+        return int(payload.get("count", 0))
+
+    def keys(self) -> List[str]:
+        return [e["key"] for e in self._all()]
+
+    def values(self) -> List[Any]:
+        return [e["value"] for e in self._all()]
+
+    def items(self) -> List[Tuple[str, Any]]:
+        return [(e["key"], e["value"]) for e in self._all()]
+
+    def clear(self) -> int:
+        _, payload = self._request("DELETE", f"{self._ds_url}/entries")
+        return int(payload.get("deleted", 0))
+
+
+def _make_backend(name: str):
+    """Pick the datastore backend from the environment PyRunner injected.
+
+    SQLite (``PYRUNNER_DB_PATH``) takes precedence so the default deployment is
+    unchanged and web-server-independent; the loopback API is used when there is
+    no local DB file (Postgres).
+    """
+    db_path = os.environ.get("PYRUNNER_DB_PATH")
+    if db_path:
+        return _SqliteBackend(name, db_path)
+
+    api_url = os.environ.get("PYRUNNER_INTERNAL_URL")
+    api_token = os.environ.get("PYRUNNER_INTERNAL_TOKEN")
+    if api_url and api_token:
+        return _ApiBackend(name, api_url, api_token)
+
+    raise RuntimeError(
+        "PyRunner datastore is not configured (no PYRUNNER_DB_PATH or "
+        "PYRUNNER_INTERNAL_URL). This module must be run from PyRunner."
+    )
 
 
 class DataStore:
     """
-    Simple key-value data store backed by SQLite.
-    Provides dict-like access to stored data.
+    Simple key-value data store. Provides dict-like access to stored data.
     """
 
     def __init__(self, name: str):
@@ -58,230 +279,68 @@ class DataStore:
             name: The name of the data store (must exist in PyRunner)
 
         Raises:
-            RuntimeError: If PYRUNNER_DB_PATH is not set
+            RuntimeError: If PyRunner did not inject a datastore configuration
             ValueError: If the data store does not exist
         """
         self.name = name
-        self._db_path = os.environ.get("PYRUNNER_DB_PATH")
-        if not self._db_path:
-            raise RuntimeError(
-                "PYRUNNER_DB_PATH not set. This module must be run from PyRunner."
+        self._backend = _make_backend(name)
+        if not self._backend.store_exists():
+            raise ValueError(
+                f"Data store '{name}' does not exist. Create it in the PyRunner UI first."
             )
-
-        # Verify the data store exists
-        self._store_id = self._get_store_id()
-        if not self._store_id:
-            raise ValueError(f"Data store '{name}' does not exist. Create it in the PyRunner UI first.")
-
-    def _get_connection(self) -> sqlite3.Connection:
-        """Get a database connection."""
-        conn = sqlite3.connect(self._db_path)
-        conn.row_factory = sqlite3.Row
-        return conn
-
-    def _get_store_id(self) -> Optional[str]:
-        """Get the UUID of this data store."""
-        with self._get_connection() as conn:
-            cursor = conn.execute(
-                "SELECT id FROM datastores WHERE name = ?",
-                (self.name,)
-            )
-            row = cursor.fetchone()
-            return row["id"] if row else None
 
     def __getitem__(self, key: str) -> Any:
-        """
-        Get a value by key.
-
-        Args:
-            key: The key to retrieve
-
-        Returns:
-            The stored value (deserialized from JSON)
-
-        Raises:
-            KeyError: If the key does not exist
-        """
-        with self._get_connection() as conn:
-            cursor = conn.execute(
-                "SELECT value_json FROM datastore_entries "
-                "WHERE datastore_id = ? AND key = ?",
-                (self._store_id, key)
-            )
-            row = cursor.fetchone()
-            if row is None:
-                raise KeyError(key)
-            return json.loads(row["value_json"])
+        """Get a value by key. Raises KeyError if the key does not exist."""
+        return self._backend.get(key)
 
     def __setitem__(self, key: str, value: Any) -> None:
-        """
-        Set a value. Creates or updates the entry.
-
-        Args:
-            key: The key to set
-            value: Any JSON-serializable value
-        """
-        value_json = json.dumps(value)
-        with self._get_connection() as conn:
-            # Use INSERT OR REPLACE for SQLite upsert
-            conn.execute(
-                """
-                INSERT INTO datastore_entries (id, datastore_id, key, value_json, created_at, updated_at)
-                VALUES (lower(hex(randomblob(16))), ?, ?, ?, datetime('now'), datetime('now'))
-                ON CONFLICT(datastore_id, key) DO UPDATE SET
-                    value_json = excluded.value_json,
-                    updated_at = datetime('now')
-                """,
-                (self._store_id, key, value_json)
-            )
-            conn.commit()
+        """Set a value. Creates or updates the entry."""
+        self._backend.set(key, value)
 
     def __delitem__(self, key: str) -> None:
-        """
-        Delete a key.
-
-        Args:
-            key: The key to delete
-
-        Raises:
-            KeyError: If the key does not exist
-        """
-        with self._get_connection() as conn:
-            cursor = conn.execute(
-                "DELETE FROM datastore_entries WHERE datastore_id = ? AND key = ?",
-                (self._store_id, key)
-            )
-            conn.commit()
-            if cursor.rowcount == 0:
-                raise KeyError(key)
+        """Delete a key. Raises KeyError if the key does not exist."""
+        self._backend.delete(key)
 
     def __contains__(self, key: str) -> bool:
-        """
-        Check if a key exists.
-
-        Args:
-            key: The key to check
-
-        Returns:
-            True if the key exists, False otherwise
-        """
-        with self._get_connection() as conn:
-            cursor = conn.execute(
-                "SELECT 1 FROM datastore_entries WHERE datastore_id = ? AND key = ?",
-                (self._store_id, key)
-            )
-            return cursor.fetchone() is not None
+        """Check if a key exists."""
+        return self._backend.contains(key)
 
     def __len__(self) -> int:
-        """
-        Return the number of entries.
-
-        Returns:
-            The count of entries in this data store
-        """
-        with self._get_connection() as conn:
-            cursor = conn.execute(
-                "SELECT COUNT(*) as count FROM datastore_entries WHERE datastore_id = ?",
-                (self._store_id,)
-            )
-            return cursor.fetchone()["count"]
+        """Return the number of entries."""
+        return self._backend.count()
 
     def __iter__(self) -> Iterator[str]:
-        """
-        Iterate over keys.
-
-        Yields:
-            Each key in the data store
-        """
+        """Iterate over keys."""
         return iter(self.keys())
 
     def __repr__(self) -> str:
         return f"DataStore('{self.name}')"
 
     def get(self, key: str, default: Any = None) -> Any:
-        """
-        Get a value with a default if not found.
-
-        Args:
-            key: The key to retrieve
-            default: Value to return if key doesn't exist (default: None)
-
-        Returns:
-            The stored value or the default
-        """
+        """Get a value with a default if not found."""
         try:
             return self[key]
         except KeyError:
             return default
 
     def keys(self) -> List[str]:
-        """
-        Return all keys in the data store.
-
-        Returns:
-            A list of all keys
-        """
-        with self._get_connection() as conn:
-            cursor = conn.execute(
-                "SELECT key FROM datastore_entries WHERE datastore_id = ? ORDER BY key",
-                (self._store_id,)
-            )
-            return [row["key"] for row in cursor.fetchall()]
+        """Return all keys in the data store."""
+        return self._backend.keys()
 
     def values(self) -> List[Any]:
-        """
-        Return all values in the data store.
-
-        Returns:
-            A list of all values (deserialized from JSON)
-        """
-        with self._get_connection() as conn:
-            cursor = conn.execute(
-                "SELECT value_json FROM datastore_entries WHERE datastore_id = ? ORDER BY key",
-                (self._store_id,)
-            )
-            return [json.loads(row["value_json"]) for row in cursor.fetchall()]
+        """Return all values in the data store."""
+        return self._backend.values()
 
     def items(self) -> List[Tuple[str, Any]]:
-        """
-        Return all key-value pairs.
-
-        Returns:
-            A list of (key, value) tuples
-        """
-        with self._get_connection() as conn:
-            cursor = conn.execute(
-                "SELECT key, value_json FROM datastore_entries WHERE datastore_id = ? ORDER BY key",
-                (self._store_id,)
-            )
-            return [(row["key"], json.loads(row["value_json"])) for row in cursor.fetchall()]
+        """Return all key-value pairs."""
+        return self._backend.items()
 
     def clear(self) -> int:
-        """
-        Delete all entries in the data store.
-
-        Returns:
-            The number of entries deleted
-        """
-        with self._get_connection() as conn:
-            cursor = conn.execute(
-                "DELETE FROM datastore_entries WHERE datastore_id = ?",
-                (self._store_id,)
-            )
-            conn.commit()
-            return cursor.rowcount
+        """Delete all entries in the data store. Returns the count deleted."""
+        return self._backend.clear()
 
     def setdefault(self, key: str, default: Any = None) -> Any:
-        """
-        Get a value, setting it to default if it doesn't exist.
-
-        Args:
-            key: The key to get/set
-            default: Value to set if key doesn't exist (default: None)
-
-        Returns:
-            The existing value or the newly set default
-        """
+        """Get a value, setting it to default if it doesn't exist."""
         try:
             return self[key]
         except KeyError:
@@ -289,13 +348,7 @@ class DataStore:
             return default
 
     def update(self, other: dict = None, **kwargs) -> None:
-        """
-        Update the data store with key-value pairs.
-
-        Args:
-            other: A dictionary of key-value pairs
-            **kwargs: Additional key-value pairs
-        """
+        """Update the data store with key-value pairs."""
         if other:
             for key, value in other.items():
                 self[key] = value
@@ -303,19 +356,7 @@ class DataStore:
             self[key] = value
 
     def pop(self, key: str, *default) -> Any:
-        """
-        Remove and return a value.
-
-        Args:
-            key: The key to remove
-            default: Optional default value if key doesn't exist
-
-        Returns:
-            The removed value or the default
-
-        Raises:
-            KeyError: If the key doesn't exist and no default is provided
-        """
+        """Remove and return a value, or the default if provided."""
         try:
             value = self[key]
             del self[key]

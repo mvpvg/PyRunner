@@ -18,6 +18,9 @@ class RunSpec:
     env: dict
     cwd: str
     timeout: Optional[int] = None
+    # Optional resource caps (posix only): {"memory_bytes", "cpu_seconds", "nproc"}.
+    # None = off (the default), reproducing today's behavior.
+    limits: Optional[dict] = None
 
 
 @dataclass

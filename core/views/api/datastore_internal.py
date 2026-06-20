@@ -25,7 +25,7 @@ from django.http import HttpRequest, JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
-from core.models import DataStore, DataStoreEntry
+from core.models import ClaudeUsage, DataStore, DataStoreEntry
 from core.views.api.decorators import internal_datastore_token_required
 
 logger = logging.getLogger(__name__)
@@ -150,3 +150,38 @@ def entry(request: HttpRequest, name: str) -> JsonResponse:
         return JsonResponse({"deleted": True})
 
     return JsonResponse({"key": obj.key, "value": obj.get_value()})
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@internal_datastore_token_required
+def record_claude_usage(request: HttpRequest) -> JsonResponse:
+    """POST /internal/claude-usage — record one Claude usage row.
+
+    The ORM equivalent of pyrunner_ai's raw-sqlite usage write, used when there
+    is no local DB file (Postgres). Best-effort telemetry: a bad row should not
+    fail the caller's run, so a malformed body is a 400 the helper ignores.
+    """
+    try:
+        data = json.loads(request.body or b"{}")
+    except (ValueError, TypeError):
+        return JsonResponse(
+            {"error": {"code": "BAD_REQUEST", "message": "Body must be valid JSON"}},
+            status=400,
+        )
+
+    ClaudeUsage.objects.create(
+        script_id=data.get("script_id") or None,
+        run_id=data.get("run_id") or None,
+        script_name=data.get("script_name", "") or "",
+        source=data.get("source") or ClaudeUsage.Source.SCRIPT,
+        model=data.get("model", "") or "",
+        input_tokens=int(data.get("input_tokens") or 0),
+        output_tokens=int(data.get("output_tokens") or 0),
+        cache_creation_tokens=int(data.get("cache_creation_tokens") or 0),
+        cache_read_tokens=int(data.get("cache_read_tokens") or 0),
+        num_turns=int(data.get("num_turns") or 0),
+        duration_ms=int(data.get("duration_ms") or 0),
+        cost_usd=data.get("cost_usd"),
+    )
+    return JsonResponse({"ok": True})
