@@ -45,14 +45,15 @@ def _key_not_found(key: str) -> JsonResponse:
     )
 
 
-def _get_store(name: str):
-    """Resolve a store by name. Returns the DataStore or None.
+def _get_store(name: str, workspace_id):
+    """Resolve a store by name within the run's workspace. Returns it or None.
 
-    ``DataStore.name`` is globally unique, so this resolves at most one row —
-    the invariant the by-name helper and public REST API also depend on.
+    Names are unique per workspace (tenancy Decision 2B); ``workspace_id`` is
+    derived server-side from the signed token's run, so a run in one workspace
+    cannot reach another workspace's store by name.
     """
     try:
-        return DataStore.objects.get(name=name)
+        return DataStore.resolve_for_workspace(name, workspace_id)
     except DataStore.DoesNotExist:
         return None
 
@@ -63,7 +64,7 @@ def _get_store(name: str):
 def resolve_store(request: HttpRequest, name: str) -> JsonResponse:
     """GET /internal/datastores/<name> — confirm a store exists (mirrors the
     helper's constructor check that raises ValueError on a missing store)."""
-    store = _get_store(name)
+    store = _get_store(name, request.datastore_workspace)
     if store is None:
         return _store_not_found(name)
     return JsonResponse({"name": store.name, "entry_count": store.entry_count})
@@ -78,7 +79,7 @@ def entries(request: HttpRequest, name: str) -> JsonResponse:
     GET    -> all entries [{key, value}] ordered by key (covers keys/values/items/len).
     DELETE -> clear all entries, returns {deleted: n}.
     """
-    store = _get_store(name)
+    store = _get_store(name, request.datastore_workspace)
     if store is None:
         return _store_not_found(name)
 
@@ -105,7 +106,7 @@ def entry(request: HttpRequest, name: str) -> JsonResponse:
     PUT    body {key,value}  -> upsert, returns {key, value}.
     DELETE ?key=K           -> {deleted: true} or 404 KEY_NOT_FOUND.
     """
-    store = _get_store(name)
+    store = _get_store(name, request.datastore_workspace)
     if store is None:
         return _store_not_found(name)
 

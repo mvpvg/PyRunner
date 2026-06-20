@@ -146,6 +146,25 @@ def internal_datastore_token_required(view_func):
             )
 
         request.datastore_run = payload
+
+        # Derive the run's workspace SERVER-SIDE (tenancy Stage 2), so by-name
+        # datastore resolution is scoped to it. The token carries only a signed
+        # run_id, so the workspace cannot be forged by the running script —
+        # unlike the SQLite helper's env var. None ⇒ the resolver falls back to
+        # the default workspace.
+        ws_id = None
+        try:
+            from core.models import Run
+
+            ws_id = (
+                Run.objects.filter(id=payload.get("run_id"))
+                .values_list("workspace_id", flat=True)
+                .first()
+            )
+        except Exception:
+            ws_id = None
+        request.datastore_workspace = ws_id
+
         return view_func(request, *args, **kwargs)
 
     return wrapper

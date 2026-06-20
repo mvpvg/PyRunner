@@ -74,9 +74,23 @@ class _SqliteBackend:
         return conn
 
     def _get_store_id(self) -> Optional[str]:
+        # Tenancy Stage 2: names are unique per workspace, so scope the lookup to
+        # the run's workspace (injected as PYRUNNER_WORKSPACE_ID, the 32-char hex
+        # of the workspace UUID — how Django stores the FK on SQLite). Fall back to
+        # a still-unassigned (NULL-workspace) store for stores created before
+        # scoping, so a single-workspace instance is unchanged.
+        ws_hex = os.environ.get("PYRUNNER_WORKSPACE_ID")
         with self._conn() as conn:
+            if ws_hex:
+                row = conn.execute(
+                    "SELECT id FROM datastores WHERE name = ? AND workspace_id = ?",
+                    (self.name, ws_hex),
+                ).fetchone()
+                if row is not None:
+                    return row["id"]
             row = conn.execute(
-                "SELECT id FROM datastores WHERE name = ?", (self.name,)
+                "SELECT id FROM datastores WHERE name = ? AND workspace_id IS NULL",
+                (self.name,),
             ).fetchone()
             return row["id"] if row else None
 

@@ -1365,6 +1365,12 @@ class BackupRestoreForm(forms.Form):
 class DataStoreForm(forms.ModelForm):
     """Form for creating and editing data stores."""
 
+    def __init__(self, *args, workspace=None, **kwargs):
+        # The active workspace scopes the name-uniqueness check (tenancy: names
+        # are unique per workspace, not globally).
+        self._workspace = workspace
+        super().__init__(*args, **kwargs)
+
     class Meta:
         model = DataStore
         fields = ["name", "description"]
@@ -1400,12 +1406,16 @@ class DataStoreForm(forms.ModelForm):
             raise forms.ValidationError(
                 "Name can only contain letters, numbers, underscores, and hyphens."
             )
-        # Check uniqueness (excluding current instance for edits)
+        # Check uniqueness within the active workspace (names are per-workspace).
         qs = DataStore.objects.filter(name__iexact=name)
+        if self._workspace is not None:
+            qs = qs.filter(workspace=self._workspace)
         if self.instance.pk:
             qs = qs.exclude(pk=self.instance.pk)
         if qs.exists():
-            raise forms.ValidationError("A data store with this name already exists.")
+            raise forms.ValidationError(
+                "A data store with this name already exists in this workspace."
+            )
         return name
 
 

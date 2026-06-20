@@ -23,7 +23,7 @@ from core.executor_backends import RunSpec, get_run_backend
 # (TaskService.force_stop_task imports it). The implementation now lives with
 # the local backend; force-stop stays pid-based for the local backend.
 from core.executor_backends.local import kill_process_tree as _kill_process_tree
-from core.models import Run, Secret
+from core.models import Run, Secret, Workspace
 from core.services import ClaudeService, EncryptionService
 
 logger = logging.getLogger(__name__)
@@ -156,6 +156,17 @@ def _build_script_environment(
 
         env["PYRUNNER_INTERNAL_URL"] = settings.PYRUNNER_INTERNAL_BASE_URL
         env["PYRUNNER_INTERNAL_TOKEN"] = mint_datastore_token(run.id)
+
+        # Trusted workspace id for datastore-by-name scoping (tenancy Stage 2).
+        # The SQLite helper scopes lookups to this workspace; it is derived from
+        # the run (never script-supplied), defaulting to the default workspace
+        # for an un-scoped run so single-workspace resolution is unchanged.
+        ws_id = run.workspace_id
+        if ws_id is None:
+            default_ws = Workspace.get_default()
+            ws_id = default_ws.id if default_ws else None
+        if ws_id is not None:
+            env["PYRUNNER_WORKSPACE_ID"] = ws_id.hex
 
     # Add script_helpers to PYTHONPATH so scripts can import pyrunner_datastore
     helpers_path = str(Path(settings.BASE_DIR) / "core" / "script_helpers")

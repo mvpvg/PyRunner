@@ -8,7 +8,7 @@ import uuid
 from django.conf import settings
 from django.db import models
 
-from .workspace import WorkspaceScopedManager
+from .workspace import Workspace, WorkspaceScopedManager
 
 
 class DataStore(models.Model):
@@ -19,14 +19,16 @@ class DataStore(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
 
+    # Tenancy Decision 2B: ``name`` is unique PER WORKSPACE (not globally), so two
+    # workspaces can each own a store called "results". Every by-name resolver
+    # (cpanel, script helper, internal + public REST APIs) scopes the lookup to a
+    # workspace; see ``resolve_for_workspace``.
     name = models.CharField(
         max_length=100,
-        unique=True,
-        help_text="Unique name for this data store (used in scripts)",
+        help_text="Name for this data store (used in scripts), unique per workspace",
     )
 
     # Tenancy seam (Phase A): nullable, backfilled to the default workspace.
-    # `name` stays GLOBALLY unique (the by-name helper + REST API depend on it).
     workspace = models.ForeignKey(
         "core.Workspace",
         on_delete=models.SET_NULL,
@@ -62,6 +64,19 @@ class DataStore(models.Model):
         verbose_name = "data store"
         verbose_name_plural = "data stores"
         ordering = ["name"]
+        constraints = [
+            # Per-workspace uniqueness (NULLs are SQL-distinct, so the partial
+            # constraint below reproduces "globally unique among un-scoped rows").
+            models.UniqueConstraint(
+                fields=["workspace", "name"],
+                name="uniq_datastore_workspace_name",
+            ),
+            models.UniqueConstraint(
+                fields=["name"],
+                condition=models.Q(workspace__isnull=True),
+                name="uniq_datastore_name_when_no_workspace",
+            ),
+        ]
 
     def __str__(self):
         return self.name
@@ -70,6 +85,34 @@ class DataStore(models.Model):
     def entry_count(self) -> int:
         """Return the number of entries in this data store."""
         return self.entries.count()
+
+    @classmethod
+    def resolve_for_workspace(cls, name: str, workspace_id):
+        """Resolve a datastore by ``name`` within a workspace (tenancy Decision 2B).
+
+        Names are unique per workspace, so this returns at most one row. The
+        transitional rule (until the Stage 3 creation-sweep) keeps a
+        single-workspace instance byte-for-byte:
+        - an un-scoped lookup (``workspace_id`` None) defaults to the default
+          workspace, so a run/token without a workspace still resolves today's
+          stores;
+        - if no store exists in the resolved workspace, fall back to a
+          still-unassigned (``workspace IS NULL``) store created before scoping.
+
+        Raises ``DataStore.DoesNotExist`` if neither exists. The workspace source
+        is always trusted/server-derived (the run's workspace, the active
+        workspace, or the API token's), never a value the script supplied.
+        """
+        if workspace_id is None:
+            default = Workspace.get_default()
+            workspace_id = default.id if default else None
+
+        if workspace_id is not None:
+            try:
+                return cls.objects.get(name=name, workspace_id=workspace_id)
+            except cls.DoesNotExist:
+                pass
+        return cls.objects.get(name=name, workspace__isnull=True)
 
 
 class DataStoreEntry(models.Model):

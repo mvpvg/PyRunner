@@ -241,8 +241,14 @@ def _get_authorized_datastore(request: HttpRequest, name: str):
     """
     token = request.api_token
 
+    # Scope by-name resolution to the token's workspace (tenancy Decision 2B). A
+    # datastore-scoped token resolves within its datastore's workspace; a global
+    # token falls back to the default workspace (a per-token workspace binding
+    # for multi-tenant API access lands with the Stage 3 token sweep).
+    workspace_id = token.datastore.workspace_id if token.datastore_id else None
+
     try:
-        datastore = DataStore.objects.get(name=name)
+        datastore = DataStore.resolve_for_workspace(name, workspace_id)
     except DataStore.DoesNotExist:
         response = JsonResponse(
             {"error": {"code": "NOT_FOUND", "message": f"Datastore '{name}' not found"}},
