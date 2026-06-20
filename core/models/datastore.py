@@ -8,6 +8,8 @@ import uuid
 from django.conf import settings
 from django.db import models
 
+from .workspace import WorkspaceScopedManager
+
 
 class DataStore(models.Model):
     """
@@ -34,6 +36,8 @@ class DataStore(models.Model):
         related_name="datastores",
         help_text="Workspace this resource belongs to (tenancy seam; nullable).",
     )
+
+    objects = WorkspaceScopedManager()
 
     description = models.TextField(
         blank=True,

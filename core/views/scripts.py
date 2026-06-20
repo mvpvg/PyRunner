@@ -218,9 +218,11 @@ def script_run_view(request: HttpRequest, pk) -> HttpResponse:
             messages.error(request, "Cannot run a disabled script.")
         return redirect("cpanel:script_detail", pk=pk)
 
-    # Create a new Run record (pending state)
+    # Create a new Run record (pending state). Stamp the run's workspace from its
+    # script (tenancy Stage 1) so the executor scopes secrets to it.
     run = Run.objects.create(
         script=script,
+        workspace_id=script.workspace_id,
         status=Run.Status.PENDING,
         triggered_by=request.user,
         code_snapshot=script.code,

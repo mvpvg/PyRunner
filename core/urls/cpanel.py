@@ -123,6 +123,12 @@ from core.views.plugins import (
     plugin_restart_view,
     plugin_restarting_view,
 )
+from core.views.workspaces import (
+    workspace_list_view,
+    workspace_create_view,
+    workspace_rename_view,
+    workspace_members_view,
+)
 
 app_name = "cpanel"
 
@@ -225,6 +231,12 @@ urlpatterns = [
     path("settings/backup/schedule/", backup_schedule_settings_view, name="backup_schedule_settings"),
     path("settings/backup/schedule/status/", backup_schedule_status_view, name="backup_schedule_status"),
     path("settings/backup/run-now/", backup_run_now_view, name="backup_run_now"),
+
+    # Workspaces (tenancy management — superuser in Stage 0)
+    path("workspaces/", workspace_list_view, name="workspace_list"),
+    path("workspaces/create/", workspace_create_view, name="workspace_create"),
+    path("workspaces/<uuid:pk>/rename/", workspace_rename_view, name="workspace_rename"),
+    path("workspaces/<uuid:pk>/members/", workspace_members_view, name="workspace_members"),
 
     # User Management
     path("users/", user_list_view, name="user_list"),

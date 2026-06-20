@@ -1,0 +1,119 @@
+{% extends "base.html" %}
+
+{% block title %}Workspaces - PyRunner{% endblock %}
+
+{% block content %}
+<div class="flex">
+    {% include "cpanel/_sidebar.html" %}
+
+    <div class="flex-1 min-w-0">
+        <div class="px-5 lg:px-8 py-7 max-w-[1440px] mx-auto space-y-5">
+
+            <div class="flex items-center justify-between gap-4">
+                <div>
+                    <h1 class="text-[22px] font-semibold tracking-tight">Workspaces</h1>
+                    <p class="text-sm text-muted mt-1">Each workspace is an isolated tenant. The switcher appears once you belong to more than one.</p>
+                </div>
+                <button type="button" onclick="document.getElementById('create-modal').classList.remove('hidden')" class="text-[13px] font-medium px-3.5 py-2 rounded-lg bg-ok text-ink hover:opacity-90 transition flex-shrink-0">New workspace</button>
+            </div>
+
+            <div class="rounded-2xl border border-line bg-panel p-6">
+                <h3 class="text-base font-semibold text-text mb-4">All workspaces</h3>
+                <div class="space-y-3">
+                    {% for ws in workspaces %}
+                    <div class="flex items-center justify-between gap-3 p-4 bg-panel-hi/40 border border-line-soft rounded-lg">
+                        <div class="flex items-center gap-3 min-w-0">
+                            <div class="w-10 h-10 rounded-lg bg-info/10 grid place-items-center flex-shrink-0">
+                                <span class="text-info font-semibold">{{ ws.name|first|upper }}</span>
+                            </div>
+                            <div class="min-w-0">
+                                <div class="flex items-center gap-2 flex-wrap">
+                                    <p class="text-text font-medium truncate">{{ ws.name }}</p>
+                                    {% if ws.is_default %}<span class="px-2 py-0.5 bg-ok/10 text-ok text-xs rounded-md">Default</span>{% endif %}
+                                </div>
+                                <p class="text-xs text-faint">{{ ws.member_count }} member{{ ws.member_count|pluralize }}</p>
+                            </div>
+                        </div>
+                        <div class="flex items-center gap-2 flex-shrink-0">
+                            <a href="{% url 'cpanel_ws:dashboard' workspace_id=ws.id %}" class="text-[13px] px-3 py-1.5 rounded-lg border border-line text-muted hover:text-text hover:border-faint transition-colors">Open</a>
+                            <a href="{% url 'cpanel:workspace_members' pk=ws.id %}" class="text-[13px] px-3 py-1.5 rounded-lg border border-line text-muted hover:text-text hover:border-faint transition-colors">Members</a>
+                            <button type="button"
+                                    data-rename-url="{% url 'cpanel:workspace_rename' pk=ws.id %}"
+                                    data-name="{{ ws.name }}"
+                                    onclick="openRenameModal(this)"
+                                    class="text-[13px] px-3 py-1.5 rounded-lg border border-line text-muted hover:text-text hover:border-faint transition-colors">Rename</button>
+                        </div>
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Create Modal -->
+<div id="create-modal" class="fixed inset-0 bg-black/50 hidden items-center justify-center z-50 flex">
+    <div class="bg-panel border border-line rounded-2xl p-6 max-w-md w-full mx-4">
+        <div class="flex items-center justify-between mb-4">
+            <h3 class="text-base font-semibold text-text">New workspace</h3>
+            <button type="button" onclick="document.getElementById('create-modal').classList.add('hidden')" class="text-muted hover:text-text">
+                <svg class="w-6 h-6" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"></path></svg>
+            </button>
+        </div>
+        <form method="post" action="{% url 'cpanel:workspace_create' %}">
+            {% csrf_token %}
+            <div class="mb-4">
+                <label for="create-name" class="block text-[13px] font-medium text-text mb-1.5">Workspace name</label>
+                <input type="text" name="name" id="create-name" required maxlength="100" placeholder="Acme Corp" class="w-full px-3.5 py-2.5 bg-ink border border-line rounded-lg text-text text-sm placeholder-faint/60 focus:outline-none focus:ring-2 focus:ring-ok/30 focus:border-ok/60 transition-colors">
+            </div>
+            <div class="flex gap-3">
+                <button type="button" onclick="document.getElementById('create-modal').classList.add('hidden')" class="flex-1 text-[13px] font-medium px-3.5 py-2 rounded-lg border border-line text-muted hover:text-text hover:border-faint transition-colors">Cancel</button>
+                <button type="submit" class="flex-1 text-[13px] font-medium px-3.5 py-2 rounded-lg bg-ok text-ink hover:opacity-90 transition">Create</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- Rename Modal -->
+<div id="rename-modal" class="fixed inset-0 bg-black/50 hidden items-center justify-center z-50 flex">
+    <div class="bg-panel border border-line rounded-2xl p-6 max-w-md w-full mx-4">
+        <div class="flex items-center justify-between mb-4">
+            <h3 class="text-base font-semibold text-text">Rename workspace</h3>
+            <button type="button" onclick="document.getElementById('rename-modal').classList.add('hidden')" class="text-muted hover:text-text">
+                <svg class="w-6 h-6" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"></path></svg>
+            </button>
+        </div>
+        <form method="post" id="rename-form" action="">
+            {% csrf_token %}
+            <div class="mb-4">
+                <label for="rename-name" class="block text-[13px] font-medium text-text mb-1.5">Workspace name</label>
+                <input type="text" name="name" id="rename-name" required maxlength="100" class="w-full px-3.5 py-2.5 bg-ink border border-line rounded-lg text-text text-sm placeholder-faint/60 focus:outline-none focus:ring-2 focus:ring-ok/30 focus:border-ok/60 transition-colors">
+            </div>
+            <div class="flex gap-3">
+                <button type="button" onclick="document.getElementById('rename-modal').classList.add('hidden')" class="flex-1 text-[13px] font-medium px-3.5 py-2 rounded-lg border border-line text-muted hover:text-text hover:border-faint transition-colors">Cancel</button>
+                <button type="submit" class="flex-1 text-[13px] font-medium px-3.5 py-2 rounded-lg bg-ok text-ink hover:opacity-90 transition">Save</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<script>
+function openRenameModal(btn) {
+    document.getElementById('rename-form').action = btn.getAttribute('data-rename-url');
+    document.getElementById('rename-name').value = btn.getAttribute('data-name');
+    document.getElementById('rename-modal').classList.remove('hidden');
+}
+
+document.addEventListener('keydown', function (event) {
+    if (event.key === 'Escape') {
+        document.getElementById('create-modal').classList.add('hidden');
+        document.getElementById('rename-modal').classList.add('hidden');
+    }
+});
+['create-modal', 'rename-modal'].forEach(function (id) {
+    document.getElementById(id).addEventListener('click', function (event) {
+        if (event.target === this) this.classList.add('hidden');
+    });
+});
+</script>
+{% endblock %}

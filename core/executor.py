@@ -14,6 +14,7 @@ import traceback
 from pathlib import Path
 
 from django.conf import settings
+from django.db.models import Q
 from django.utils import timezone
 
 from core.executor_backends import RunSpec, get_run_backend
@@ -31,12 +32,26 @@ logger = logging.getLogger(__name__)
 MAX_OUTPUT_BYTES = 1_000_000
 
 
-def _get_secrets_env() -> dict:
-    """
-    Get all secrets as environment variables.
+def resolve_secrets_for_run(run) -> dict:
+    """Resolve the secrets to inject into (and mask in) a run, scoped to its workspace.
+
+    The SINGLE shared resolver feeding BOTH env injection and output masking, so
+    the two can never drift (no leak, no over-mask). Tenancy Stage 1.
+
+    Workspace scoping (transitional until the Stage 3 creation-sweep, chosen to
+    keep a single-workspace instance byte-for-byte):
+    - ``run`` is None or ``run.workspace_id`` is None ⇒ ALL secrets (today's
+      behavior; an un-scoped run cannot narrow).
+    - otherwise ⇒ the run's-workspace secrets PLUS still-unassigned
+      (``workspace IS NULL``) secrets — because secret *creation* is not yet
+      workspace-scoped, so a freshly-created (NULL) secret must keep injecting on
+      a single-workspace instance.
+
+    Phase B (plugin platform) layers owner_plugin / per-script grant rules INSIDE
+    this same function; workspace scoping composes with them here, never forks.
 
     Returns:
-        Dict of {key: decrypted_value} for all secrets
+        Dict of {key: decrypted_value}.
     """
     secrets_env = {}
 
@@ -46,7 +61,13 @@ def _get_secrets_env() -> dict:
         return secrets_env
 
     try:
-        for secret in Secret.objects.all():
+        queryset = Secret.objects.all()
+        ws_id = getattr(run, "workspace_id", None) if run is not None else None
+        if ws_id is not None:
+            queryset = queryset.filter(
+                Q(workspace_id=ws_id) | Q(workspace__isnull=True)
+            )
+        for secret in queryset:
             try:
                 secrets_env[secret.key] = secret.get_decrypted_value()
             except Exception as e:
@@ -82,8 +103,9 @@ def _build_script_environment(
     for _denied in settings.PYRUNNER_RUN_ENV_DENYLIST:
         env.pop(_denied, None)
 
-    # Add secrets (overriding any existing vars with same name)
-    secrets = _get_secrets_env()
+    # Add secrets (overriding any existing vars with same name), scoped to the
+    # run's workspace via the shared resolver.
+    secrets = resolve_secrets_for_run(run)
     env.update(secrets)
 
     # Add webhook data if present
@@ -342,7 +364,9 @@ def execute_run(run: Run, webhook_data: dict | None = None) -> None:
 
             # Build environment with secrets and webhook data injected
             script_env = _build_script_environment(webhook_data, run=run)
-            secrets = _get_secrets_env()
+            # Masking uses the SAME resolved set as injection (shared resolver),
+            # so masking can never drift from what was injected.
+            secrets = resolve_secrets_for_run(run)
 
             # Also mask the injected Claude credential in output, if any.
             claude_env = ClaudeService.get_script_env()

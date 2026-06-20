@@ -8,6 +8,7 @@ from django.conf import settings
 from django.db import models
 
 from .script import Script
+from .workspace import WorkspaceScopedManager
 
 
 class Run(models.Model):
@@ -46,6 +47,8 @@ class Run(models.Model):
         related_name="runs",
         help_text="Workspace this run belongs to (tenancy seam; nullable).",
     )
+
+    objects = WorkspaceScopedManager()
 
     # Execution status
     status = models.CharField(

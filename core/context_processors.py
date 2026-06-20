@@ -33,3 +33,35 @@ def plugin_nav(request):
         return {"plugin_nav": nav_for(getattr(request, "user", None))}
     except Exception:
         return {"plugin_nav": []}
+
+
+def workspaces(request):
+    """Active workspace + the user's workspaces, for the switcher (tenancy Stage 0).
+
+    Defensive: anonymous users, an unresolved workspace, or a DB hiccup all yield
+    safe empty defaults so rendering never breaks. The switcher is shown only when
+    the user belongs to 2+ workspaces — a single-workspace instance hides it and
+    stays byte-for-byte identical to before tenancy.
+    """
+    ctx = {
+        "active_workspace": getattr(request, "workspace", None),
+        "user_workspaces": [],
+        "show_workspace_switcher": False,
+    }
+
+    user = getattr(request, "user", None)
+    if user is None or not getattr(user, "is_authenticated", False):
+        return ctx
+
+    try:
+        from core.models import Workspace
+
+        user_workspaces = list(
+            Workspace.for_user(user).order_by("-is_default", "name")
+        )
+        ctx["user_workspaces"] = user_workspaces
+        ctx["show_workspace_switcher"] = len(user_workspaces) >= 2
+    except Exception:
+        pass
+
+    return ctx

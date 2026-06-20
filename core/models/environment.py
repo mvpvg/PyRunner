@@ -10,6 +10,8 @@ from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import models
 
+from .workspace import WorkspaceScopedManager
+
 
 def validate_environment_path(value: str) -> None:
     """
@@ -65,6 +67,8 @@ class Environment(models.Model):
         related_name="environments",
         help_text="Workspace this resource belongs to (tenancy seam; nullable).",
     )
+
+    objects = WorkspaceScopedManager()
 
     # Path relative to ENVIRONMENTS_ROOT
     path = models.CharField(

@@ -8,6 +8,7 @@ from django.conf import settings
 from django.db import models
 
 from .script import Script
+from .workspace import WorkspaceScopedManager
 
 
 class ScriptSchedule(models.Model):
@@ -52,6 +53,8 @@ class ScriptSchedule(models.Model):
         related_name="schedules",
         help_text="Workspace this schedule belongs to (tenancy seam; nullable).",
     )
+
+    objects = WorkspaceScopedManager()
 
     # Run mode selection
     run_mode = models.CharField(

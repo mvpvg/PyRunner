@@ -30,12 +30,12 @@ class RunEnvDenylistTests(TestCase):
         self.assertNotIn("ENCRYPTION_KEY", built)
         self.assertNotIn("SECRET_KEY", built)
 
-    @mock.patch("core.executor._get_secrets_env", return_value={"MY_API": "v"})
+    @mock.patch("core.executor.resolve_secrets_for_run", return_value={"MY_API": "v"})
     def test_user_secrets_still_inject(self, _s):
         built = _build_script_environment(run=_make_run())
         self.assertEqual(built["MY_API"], "v")
 
-    @mock.patch("core.executor._get_secrets_env", return_value={"ENCRYPTION_KEY": "userval"})
+    @mock.patch("core.executor.resolve_secrets_for_run", return_value={"ENCRYPTION_KEY": "userval"})
     def test_user_secret_named_like_infra_overrides_after_filter(self, _s):
         # The host ENCRYPTION_KEY is dropped first, then the user's Secret of the
         # same name injects — so the user's value wins, not the host's.

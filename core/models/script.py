@@ -9,6 +9,7 @@ from django.conf import settings
 from django.db import models
 
 from .environment import Environment
+from .workspace import WorkspaceScopedManager
 
 
 class Script(models.Model):
@@ -32,6 +33,8 @@ class Script(models.Model):
         related_name="scripts",
         help_text="Workspace this resource belongs to (tenancy seam; nullable).",
     )
+
+    objects = WorkspaceScopedManager()
 
     # The actual Python code
     code = models.TextField(help_text="Python code to execute")

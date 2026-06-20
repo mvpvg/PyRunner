@@ -7,6 +7,8 @@ import uuid
 from django.conf import settings
 from django.db import models
 
+from .workspace import WorkspaceScopedManager
+
 
 class Secret(models.Model):
     """
@@ -26,6 +28,8 @@ class Secret(models.Model):
         related_name="secrets",
         help_text="Workspace this resource belongs to (tenancy seam; nullable).",
     )
+
+    objects = WorkspaceScopedManager()
 
     # Key name - must be uppercase with underscores (e.g., API_KEY, DATABASE_URL)
     key = models.CharField(

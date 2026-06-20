@@ -77,9 +77,11 @@ def webhook_trigger_view(request: HttpRequest, token: str) -> JsonResponse:
     # Extract webhook data
     webhook_data = _extract_webhook_data(request)
 
-    # Create a new Run record
+    # Create a new Run record. No user/session here — the run inherits its
+    # workspace from the script (tenancy Stage 1).
     run = Run.objects.create(
         script=script,
+        workspace_id=script.workspace_id,
         status=Run.Status.PENDING,
         triggered_by=None,  # Webhook-triggered, no user
         trigger_type=Run.TriggerType.API,

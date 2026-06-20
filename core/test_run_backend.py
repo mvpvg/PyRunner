@@ -97,7 +97,7 @@ class ExecuteRunGoldenTests(TestCase):
 
     @_stub_python
     @mock.patch(
-        "core.executor._get_secrets_env",
+        "core.executor.resolve_secrets_for_run",
         return_value={"MY_SECRET": "supersecretvalue12"},
     )
     def test_secret_value_is_masked(self, _secrets, _val):

@@ -44,7 +44,18 @@ urlpatterns = [
     path(f"{get_admin_url_slug()}/", admin.site.urls),
     path("setup/", include("core.urls.setup")),
     path("auth/", include("core.urls.auth")),
+    # Canonical, unprefixed cpanel routes. A single-workspace instance only ever
+    # uses these — byte-for-byte identical to before tenancy. Keep FIRST.
     path("cpanel/", include("core.urls.cpanel")),
+    # Additive workspace-scoped mount of the SAME cpanel routes (tenancy
+    # Decision 1: optional URL prefix). ActiveWorkspaceMiddleware reads
+    # workspace_id, validates membership (404 if not a member), and strips the
+    # kwarg so the views are unchanged. Distinct instance namespace 'cpanel_ws'
+    # lets {% ws_url %} reverse to the prefixed form when a workspace is active.
+    path(
+        "cpanel/w/<uuid:workspace_id>/",
+        include(("core.urls.cpanel", "cpanel"), namespace="cpanel_ws"),
+    ),
     # REST API endpoints (token auth required)
     path("api/v1/", include("core.urls.api")),
     # Internal loopback-only datastore API (Seam 1). Signed per-run token auth;

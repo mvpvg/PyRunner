@@ -83,6 +83,9 @@ MIDDLEWARE = [
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
     "core.middleware.SetupWizardMiddleware",
+    # Tenancy (Decision 1): resolve request.workspace from the optional /w/<id>/
+    # URL prefix. Last so request.user + the URL kwarg are both available.
+    "core.middleware.ActiveWorkspaceMiddleware",
 ]
 
 ROOT_URLCONF = "pyrunner.urls"
@@ -99,6 +102,7 @@ TEMPLATES = [
                 "django.contrib.messages.context_processors.messages",
                 "core.context_processors.pyrunner_version",
                 "core.context_processors.plugin_nav",
+                "core.context_processors.workspaces",
             ],
         },
     },

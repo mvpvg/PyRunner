@@ -13,7 +13,26 @@ intentionally out of scope here.
 
 import uuid
 
+from django.conf import settings
 from django.db import models
+
+
+class WorkspaceScopedQuerySet(models.QuerySet):
+    """QuerySet for the six scoped models, adding the tenancy sweep's primitive.
+
+    ``Model.objects.for_workspace(ws)`` is the single, greppable way every
+    list/service query narrows to the active workspace once the Stage 3 sweep
+    lands. Added now (unused) so the eventual flip is mechanical. Managers are
+    not serialized into migrations (``use_in_migrations`` defaults False), so
+    attaching this is a behavior-only, drift-free change.
+    """
+
+    def for_workspace(self, workspace):
+        return self.filter(workspace=workspace)
+
+
+# Default manager that keeps all standard behavior and adds ``for_workspace``.
+WorkspaceScopedManager = models.Manager.from_queryset(WorkspaceScopedQuerySet)
 
 
 class Workspace(models.Model):
@@ -56,3 +75,129 @@ class Workspace(models.Model):
     def get_default(cls):
         """Return the default workspace (the one the backfill created), or None."""
         return cls.objects.filter(is_default=True).order_by("created_at").first()
+
+    @classmethod
+    def for_user(cls, user):
+        """Workspaces the user may act in. Superusers see all; anonymous sees none."""
+        if user is None or not getattr(user, "is_authenticated", False):
+            return cls.objects.none()
+        if user.is_superuser:
+            return cls.objects.all()
+        return cls.objects.filter(memberships__user=user).distinct()
+
+    @classmethod
+    def resolve_for(cls, user, requested_id=None):
+        """Resolve the active workspace for a request.
+
+        Returns ``(workspace, ok)``:
+        - ``requested_id`` given and the user may access it ⇒ ``(ws, True)``.
+        - ``requested_id`` given but unknown / not a member ⇒ ``(None, False)``
+          (the middleware turns this into a 404 — the URL is never trusted).
+        - no ``requested_id`` ⇒ the user's default workspace ⇒ ``(ws, True)``
+          (resolve-in-place; never a redirect).
+        """
+        if requested_id is not None:
+            ws = cls.objects.filter(pk=requested_id).first()
+            if ws is None:
+                return None, False
+            if user is not None and user.is_superuser:
+                return ws, True
+            is_member = WorkspaceMembership.objects.filter(
+                user=user, workspace=ws
+            ).exists()
+            return (ws, True) if is_member else (None, False)
+
+        # No explicit request: pick the user's default-ish workspace.
+        if user is not None and user.is_superuser:
+            return cls.get_default(), True
+        member_ws = cls.for_user(user)
+        default = cls.get_default()
+        if default is not None and member_ws.filter(pk=default.pk).exists():
+            return default, True
+        return member_ws.order_by("-is_default", "name").first(), True
+
+
+class WorkspaceMembership(models.Model):
+    """A user's membership in a workspace, with a role (RBAC, Decision 4).
+
+    This is the *only* source of "which workspaces a user may act in" — there is
+    no per-user ownership on the scoped resources. The Phase-A backfill seeds one
+    membership per existing user in the default workspace; the security sweep
+    keys isolation off membership, and roles gate management actions in a later
+    stage. ``role`` is present now so the column never needs a later migration,
+    but Stage 0 does not yet enforce it.
+    """
+
+    ROLE_OWNER = "owner"
+    ROLE_ADMIN = "admin"
+    ROLE_MEMBER = "member"
+    ROLE_CHOICES = [
+        (ROLE_OWNER, "Owner"),
+        (ROLE_ADMIN, "Admin"),
+        (ROLE_MEMBER, "Member"),
+    ]
+    # Roles allowed to manage the workspace (members, rename, delete).
+    MANAGE_ROLES = (ROLE_OWNER, ROLE_ADMIN)
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="workspace_memberships",
+    )
+    workspace = models.ForeignKey(
+        "core.Workspace",
+        on_delete=models.CASCADE,
+        related_name="memberships",
+    )
+    role = models.CharField(
+        max_length=20,
+        choices=ROLE_CHOICES,
+        default=ROLE_MEMBER,
+        db_index=True,
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "workspace_memberships"
+        verbose_name = "workspace membership"
+        verbose_name_plural = "workspace memberships"
+        ordering = ["workspace__name", "user__email"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "workspace"], name="uniq_user_workspace"
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.user} → {self.workspace} ({self.role})"
+
+    @property
+    def can_manage(self) -> bool:
+        """Whether this role may manage the workspace (members/rename/delete)."""
+        return self.role in self.MANAGE_ROLES
+
+    @classmethod
+    def ensure(cls, user, workspace=None, role=ROLE_MEMBER):
+        """Idempotently ensure ``user`` is a member of ``workspace``.
+
+        Used by the backfill and the new-user hook so every user always has at
+        least one membership (the middleware needs one to resolve a workspace).
+        If the membership exists, the role is upgraded toward owner but never
+        silently downgraded. Returns the membership, or ``None`` if there is no
+        workspace to attach to yet (very early setup, before the backfill).
+        """
+        if workspace is None:
+            workspace = Workspace.get_default()
+        if workspace is None or user is None:
+            return None
+
+        membership, created = cls.objects.get_or_create(
+            user=user, workspace=workspace, defaults={"role": role}
+        )
+        if not created and role == cls.ROLE_OWNER and membership.role != cls.ROLE_OWNER:
+            membership.role = cls.ROLE_OWNER
+            membership.save(update_fields=["role", "updated_at"])
+        return membership
