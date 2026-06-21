@@ -58,6 +58,67 @@
         </div>
     </section>
 
+    <!-- Secrets (injection scope + per-script attach) -->
+    <section class="rounded-2xl border border-line bg-panel"
+             data-picker-url="{% url 'cpanel:secret_picker' %}"
+             data-scan-url="{% url 'cpanel:scan_env_refs' %}"
+             data-secret-new-url="{% url 'cpanel:secret_create' %}">
+        <div class="flex items-center gap-2 px-5 py-4 border-b border-line-soft">
+            <svg class="w-4 h-4 text-faint" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"/></svg>
+            <h3 class="text-sm font-semibold">Secrets</h3>
+        </div>
+        <div class="p-5 space-y-4">
+            <!-- Injection-mode pills (styled like the status-filter pills) -->
+            <div class="inline-flex rounded-lg border border-line p-0.5 bg-ink">
+                {% with mode=form.injection_mode.value|default:"all" %}
+                <label class="cursor-pointer">
+                    <input type="radio" name="injection_mode" value="all" class="sr-only peer" {% if mode != "selected" %}checked{% endif %} onchange="onInjectionModeChange()">
+                    <span class="block px-3 py-1 text-[13px] rounded-md text-muted peer-checked:bg-panel peer-checked:text-text peer-checked:shadow-sm transition-colors">All</span>
+                </label>
+                <label class="cursor-pointer">
+                    <input type="radio" name="injection_mode" value="selected" class="sr-only peer" {% if mode == "selected" %}checked{% endif %} onchange="onInjectionModeChange()">
+                    <span class="block px-3 py-1 text-[13px] rounded-md text-muted peer-checked:bg-panel peer-checked:text-text peer-checked:shadow-sm transition-colors">Selected</span>
+                </label>
+                {% endwith %}
+            </div>
+
+            <!-- All mode: calm, do-nothing note -->
+            <p id="injection-all-note" class="text-xs text-faint">All workspace secrets are injected — the default. Existing scripts are unaffected.</p>
+
+            <!-- Selected mode: per-script attach -->
+            <div id="injection-selected-panel" class="space-y-3 hidden">
+                <p class="text-xs text-faint">Only the secrets attached here are injected (plus any owned by the same plugin, and explicitly-global secrets).</p>
+
+                <div id="secret-chips" class="flex flex-wrap gap-2">
+                    {% for s in granted_secrets %}
+                    <span class="secret-chip inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-info/10 text-info border border-info/20 text-xs font-mono" data-id="{{ s.id }}">
+                        {{ s.key }}{% if s.owner_plugin %}<span class="not-italic text-[10px] opacity-70">· {{ s.owner_plugin }}</span>{% endif %}
+                        <button type="button" class="hover:text-fail" onclick="removeSecretChip(this)" aria-label="Remove">×</button>
+                        <input type="hidden" name="granted_secret_ids" value="{{ s.id }}">
+                    </span>
+                    {% endfor %}
+                </div>
+
+                <div class="relative">
+                    <input type="text" id="secret-search" autocomplete="off" placeholder="Search secrets to attach…"
+                           class="w-full px-3.5 py-2.5 bg-ink border border-line rounded-lg text-text text-sm focus:outline-none focus:ring-2 focus:ring-ok/30 focus:border-ok/60 transition-colors"
+                           oninput="onSecretSearch()" onfocus="onSecretSearch()">
+                    <div id="secret-results" class="absolute z-10 left-0 right-0 mt-1 rounded-lg border border-line bg-panel shadow-lg max-h-60 overflow-y-auto hidden"></div>
+                </div>
+
+                <div class="flex items-center gap-3">
+                    <button type="button" onclick="autoDetectSecrets()"
+                            class="inline-flex items-center gap-1.5 text-[13px] px-3 py-1.5 rounded-lg border border-line text-muted hover:text-text hover:border-faint transition-colors">
+                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/></svg>
+                        Auto-detect from code
+                    </button>
+                    <span id="secret-scan-status" class="text-xs text-faint"></span>
+                </div>
+                <div id="secret-suggestions" class="flex flex-wrap gap-2"></div>
+            </div>
+        </div>
+    </section>
+
     {% if schedule_form %}
     <!-- Schedule (collapsible) -->
     <section class="rounded-2xl border border-line bg-panel overflow-hidden">
@@ -208,3 +269,137 @@
         </div>
     </section>
 </div>
+
+<script>
+(function () {
+    "use strict";
+    var section = document.querySelector('section[data-picker-url]');
+    if (!section) return;
+    var PICKER_URL = section.dataset.pickerUrl;
+    var SCAN_URL = section.dataset.scanUrl;
+    var SECRET_NEW_URL = section.dataset.secretNewUrl;
+
+    function csrf() {
+        var el = document.querySelector('[name=csrfmiddlewaretoken]');
+        return el ? el.value : '';
+    }
+    function chipsBox() { return document.getElementById('secret-chips'); }
+    function hasChip(id) { return !!chipsBox().querySelector('.secret-chip[data-id="' + id + '"]'); }
+
+    window.onInjectionModeChange = function () {
+        var selected = document.querySelector('input[name="injection_mode"]:checked');
+        var isSel = selected && selected.value === 'selected';
+        document.getElementById('injection-selected-panel').classList.toggle('hidden', !isSel);
+        document.getElementById('injection-all-note').classList.toggle('hidden', isSel);
+    };
+
+    window.removeSecretChip = function (btn) {
+        btn.closest('.secret-chip').remove();
+    };
+
+    function addSecretChip(id, key, owner) {
+        if (!id || hasChip(id)) return;
+        var chip = document.createElement('span');
+        chip.className = 'secret-chip inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-info/10 text-info border border-info/20 text-xs font-mono';
+        chip.dataset.id = id;
+        chip.appendChild(document.createTextNode(key));
+        if (owner) {
+            var o = document.createElement('span');
+            o.className = 'not-italic text-[10px] opacity-70';
+            o.textContent = '· ' + owner;
+            chip.appendChild(o);
+        }
+        var x = document.createElement('button');
+        x.type = 'button'; x.className = 'hover:text-fail'; x.textContent = '×';
+        x.setAttribute('aria-label', 'Remove');
+        x.onclick = function () { removeSecretChip(x); };
+        chip.appendChild(x);
+        var hidden = document.createElement('input');
+        hidden.type = 'hidden'; hidden.name = 'granted_secret_ids'; hidden.value = id;
+        chip.appendChild(hidden);
+        chipsBox().appendChild(chip);
+    }
+
+    // --- search autocomplete -------------------------------------------------
+    var searchTimer = null;
+    window.onSecretSearch = function () {
+        clearTimeout(searchTimer);
+        searchTimer = setTimeout(runSearch, 180);
+    };
+    function runSearch() {
+        var q = document.getElementById('secret-search').value.trim();
+        var box = document.getElementById('secret-results');
+        fetch(PICKER_URL + '?q=' + encodeURIComponent(q), {headers: {'X-Requested-With': 'fetch'}})
+            .then(function (r) { return r.json(); })
+            .then(function (data) { renderResults(box, data.secrets || []); })
+            .catch(function () { box.classList.add('hidden'); });
+    }
+    function renderResults(box, secrets) {
+        box.innerHTML = '';
+        var fresh = secrets.filter(function (s) { return !hasChip(s.id); });
+        if (!fresh.length) { box.classList.add('hidden'); return; }
+        fresh.forEach(function (s) {
+            var row = document.createElement('button');
+            row.type = 'button';
+            row.className = 'w-full text-left px-3 py-2 hover:bg-panel-hi/60 flex items-center justify-between gap-2';
+            var k = document.createElement('span');
+            k.className = 'font-mono text-sm text-text'; k.textContent = s.key;
+            var tag = document.createElement('span');
+            tag.className = 'text-[10px] text-faint';
+            tag.textContent = s.owner_plugin ? s.owner_plugin : 'System';
+            row.appendChild(k); row.appendChild(tag);
+            row.onclick = function () {
+                addSecretChip(s.id, s.key, s.owner_plugin);
+                document.getElementById('secret-search').value = '';
+                box.classList.add('hidden');
+            };
+            box.appendChild(row);
+        });
+        box.classList.remove('hidden');
+    }
+    document.addEventListener('click', function (e) {
+        if (!e.target.closest('#secret-search') && !e.target.closest('#secret-results')) {
+            var b = document.getElementById('secret-results');
+            if (b) b.classList.add('hidden');
+        }
+    });
+
+    // --- auto-detect from code ----------------------------------------------
+    window.autoDetectSecrets = function () {
+        var code = (document.getElementById('id_code') || {}).value || '';
+        var status = document.getElementById('secret-scan-status');
+        var sugg = document.getElementById('secret-suggestions');
+        status.textContent = 'Scanning…'; sugg.innerHTML = '';
+        var body = new URLSearchParams();
+        body.append('code', code);
+        body.append('csrfmiddlewaretoken', csrf());
+        fetch(SCAN_URL, {method: 'POST', body: body, headers: {'X-Requested-With': 'fetch'}})
+            .then(function (r) { return r.json(); })
+            .then(function (data) {
+                var refs = data.refs || [];
+                var attached = 0, missing = 0;
+                refs.forEach(function (ref) {
+                    if (ref.secret_id) { if (!hasChip(ref.secret_id)) { addSecretChip(ref.secret_id, ref.key, ''); attached++; } }
+                    else { sugg.appendChild(missingChip(ref.key)); missing++; }
+                });
+                status.textContent = refs.length
+                    ? ('Found ' + refs.length + ' reference(s); attached ' + attached + (missing ? ', ' + missing + ' not stored yet' : '') + '.')
+                    : 'No os.environ references found in the code.';
+            })
+            .catch(function () { status.textContent = 'Scan failed.'; });
+    };
+    function missingChip(key) {
+        var a = document.createElement('a');
+        a.href = SECRET_NEW_URL; a.target = '_blank'; a.rel = 'noopener';
+        a.className = 'inline-flex items-center gap-1 px-2.5 py-1 rounded-full border border-warn/40 bg-warn/10 text-warn text-xs font-mono hover:bg-warn/20';
+        a.textContent = key;
+        var plus = document.createElement('span');
+        plus.className = 'not-italic text-[10px]'; plus.textContent = '+ create';
+        a.appendChild(plus);
+        a.title = 'No secret named ' + key + ' yet — create it, then re-run Auto-detect.';
+        return a;
+    }
+
+    onInjectionModeChange();  // set initial visibility
+})();
+</script>

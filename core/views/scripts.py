@@ -1,18 +1,60 @@
 """
 Script views for the control panel.
 """
+import re
+
 from django.shortcuts import render, redirect, get_object_or_404
 from django.contrib.auth.decorators import login_required
 from django.contrib import messages
 from django.core.exceptions import ValidationError
 from django.views.decorators.http import require_POST
-from django.http import HttpRequest, HttpResponse
+from django.http import HttpRequest, HttpResponse, JsonResponse
 
-from core.models import Script, Run, ScriptSchedule, ScheduleHistory, Tag
+from core.models import Script, Run, ScriptSchedule, ScheduleHistory, Secret, SecretGrant, Tag
 from core.forms import ScriptForm, ScheduleForm
 from core.tasks import queue_script_run
 from core.services.schedule_service import ScheduleService
 from core.views.ownership import owned_block_message, owned_delete_blocked
+
+# Matches os.environ['X'] / os.environ.get('X') / os.getenv('X') (single/double quotes).
+_ENV_REF_RE = re.compile(
+    r"""os\.(?:environ\s*\[|environ\.get\s*\(|getenv\s*\()\s*['"]([A-Za-z_][A-Za-z0-9_]*)['"]"""
+)
+
+
+def _reconcile_grants(script, secret_ids, workspace) -> None:
+    """Make the script's SecretGrant set exactly match ``secret_ids`` (Selected mode).
+
+    Only secrets in the active workspace are grantable. Adds missing grants,
+    removes deselected ones; never touches grants for secrets outside the
+    workspace's reach.
+    """
+    valid = {
+        str(pk)
+        for pk in Secret.objects.for_workspace(workspace)
+        .filter(pk__in=[s for s in secret_ids if s])
+        .values_list("pk", flat=True)
+    }
+    existing = {str(g.secret_id): g for g in SecretGrant.objects.filter(script=script)}
+    for sid in valid - existing.keys():
+        SecretGrant.objects.create(script=script, secret_id=sid, active=True)
+    for sid in existing.keys() - valid:
+        existing[sid].delete()
+
+
+@login_required
+@require_POST
+def scan_env_refs_view(request: HttpRequest) -> HttpResponse:
+    """Scan a posted script body for os.environ references; return the keys it uses
+    and which already exist as secrets in the active workspace (for one-click attach)."""
+    code = request.POST.get("code", "")
+    keys = sorted(set(_ENV_REF_RE.findall(code)))
+    existing = {
+        s.key: str(s.id)
+        for s in Secret.objects.for_workspace(request.workspace).filter(key__in=keys)
+    }
+    refs = [{"key": k, "secret_id": existing.get(k)} for k in keys]
+    return JsonResponse({"refs": refs})
 
 
 # Starter code templates available via ?template=<key> on the create page.
@@ -103,6 +145,9 @@ def script_create_view(request: HttpRequest) -> HttpResponse:
             script.workspace = request.workspace
             script.save()
             form.save_m2m()  # Save M2M relationships (tags)
+            # Reconcile per-script secret grants when in Selected injection mode.
+            if script.injection_mode == Script.InjectionMode.SELECTED:
+                _reconcile_grants(script, request.POST.getlist("granted_secret_ids"), request.workspace)
             messages.success(request, f'Script "{script.name}" created successfully.')
             return redirect("cpanel:script_detail", pk=script.pk)
     else:
@@ -115,6 +160,7 @@ def script_create_view(request: HttpRequest) -> HttpResponse:
         "form": form,
         "available_tags": available_tags,
         "selected_tag_ids": [],
+        "granted_secrets": [],
     })
 
 
@@ -169,6 +215,8 @@ def script_edit_view(request: HttpRequest, pk) -> HttpResponse:
             script = form.save(commit=False)
             script.save()
             form.save_m2m()
+            if script.injection_mode == Script.InjectionMode.SELECTED:
+                _reconcile_grants(script, request.POST.getlist("granted_secret_ids"), request.workspace)
             schedule = schedule_form.save()
 
             # Capture new config
@@ -206,12 +254,17 @@ def script_edit_view(request: HttpRequest, pk) -> HttpResponse:
 
     available_tags = Tag.objects.all().order_by("name")
     selected_tag_ids = list(script.tags.values_list("pk", flat=True))
+    granted_secrets = [
+        {"id": str(g.secret_id), "key": g.secret.key, "owner_plugin": g.secret.owner_plugin or ""}
+        for g in script.secret_grants.select_related("secret").filter(active=True)
+    ]
     return render(request, "cpanel/scripts/edit.html", {
         "form": form,
         "schedule_form": schedule_form,
         "script": script,
         "available_tags": available_tags,
         "selected_tag_ids": selected_tag_ids,
+        "granted_secrets": granted_secrets,
     })
 
 

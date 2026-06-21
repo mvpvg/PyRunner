@@ -4,7 +4,7 @@ Secret management views for the control panel.
 
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
-from django.http import HttpRequest, HttpResponse
+from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.views.decorators.http import require_POST
 
@@ -12,6 +12,27 @@ from core.forms import SecretCreateForm, SecretEditForm
 from core.models import Secret
 from core.services import EncryptionService
 from core.views.ownership import owned_block_message, owned_delete_blocked
+
+
+@login_required
+def secret_picker_view(request: HttpRequest) -> HttpResponse:
+    """Autocomplete for the script secret-attach UI: workspace secrets matching ``q``,
+    each tagged with its owner (System for unowned) so results group cleanly."""
+    q = (request.GET.get("q") or "").strip()
+    qs = Secret.objects.for_workspace(request.workspace)
+    if q:
+        qs = qs.filter(key__icontains=q)
+    qs = qs.order_by("owner_plugin", "key")[:50]
+    secrets = [
+        {
+            "id": str(s.id),
+            "key": s.key,
+            "owner_plugin": s.owner_plugin or "",
+            "description": s.description,
+        }
+        for s in qs
+    ]
+    return JsonResponse({"secrets": secrets})
 
 
 @login_required

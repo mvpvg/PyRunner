@@ -18,6 +18,7 @@ from core.views.scripts import (
     webhook_enable_view,
     webhook_disable_view,
     webhook_regenerate_view,
+    scan_env_refs_view,
 )
 from core.views.runs import run_list_view, run_detail_view
 from core.views.changelog import changelog_view
@@ -56,6 +57,7 @@ from core.views.secrets import (
     secret_create_view,
     secret_edit_view,
     secret_delete_view,
+    secret_picker_view,
 )
 from core.views.tags import (
     tag_list_view,
@@ -150,6 +152,7 @@ urlpatterns = [
     # Scripts
     path("scripts/", script_list_view, name="script_list"),
     path("scripts/create/", script_create_view, name="script_create"),
+    path("api/scan-env-refs/", scan_env_refs_view, name="scan_env_refs"),
     path("scripts/<uuid:pk>/", script_detail_view, name="script_detail"),
     path("scripts/<uuid:pk>/edit/", script_edit_view, name="script_edit"),
     path("scripts/<uuid:pk>/run/", script_run_view, name="script_run"),
@@ -196,6 +199,7 @@ urlpatterns = [
     # Secrets
     path("secrets/", secret_list_view, name="secret_list"),
     path("secrets/create/", secret_create_view, name="secret_create"),
+    path("api/secret-picker/", secret_picker_view, name="secret_picker"),
     path("secrets/<uuid:pk>/edit/", secret_edit_view, name="secret_edit"),
     path("secrets/<uuid:pk>/delete/", secret_delete_view, name="secret_delete"),
 

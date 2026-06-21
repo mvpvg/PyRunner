@@ -89,6 +89,7 @@ class ScriptForm(forms.ModelForm):
             "timeout_seconds",
             "is_enabled",
             "isolation_mode",
+            "injection_mode",
             "notify_on",
             "notify_email",
             "notify_webhook_url",
@@ -119,6 +120,7 @@ class ScriptForm(forms.ModelForm):
             ),
             "is_enabled": forms.CheckboxInput(attrs={"class": CHECK_CLASS}),
             "isolation_mode": forms.Select(attrs={"class": INPUT_CLASS}),
+            "injection_mode": forms.Select(attrs={"class": INPUT_CLASS}),
             "notify_on": forms.Select(attrs={"class": INPUT_CLASS}),
             "notify_email": forms.EmailInput(
                 attrs={
@@ -143,6 +145,7 @@ class ScriptForm(forms.ModelForm):
             "timeout_seconds": "Timeout (seconds)",
             "is_enabled": "Enabled",
             "isolation_mode": "Execution Isolation",
+            "injection_mode": "Secret injection",
             "notify_on": "Notify On",
             "notify_email": "Notification Email",
             "notify_webhook_url": "Webhook URL",
@@ -151,6 +154,7 @@ class ScriptForm(forms.ModelForm):
         help_texts = {
             "timeout_seconds": "Maximum execution time (1 second to 24 hours)",
             "isolation_mode": "Run sandboxed. Effective only when the workspace policy is 'optional' (a 'required' workspace always sandboxes).",
+            "injection_mode": "All = every workspace secret (default). Selected = only the secrets you attach below.",
             "notify_email": "Leave empty to use global default",
             "notify_webhook_url": "URL to POST notifications to when script completes",
         }
@@ -159,6 +163,12 @@ class ScriptForm(forms.ModelForm):
         super().__init__(*args, **kwargs)
         # Only show active environments
         self.fields["environment"].queryset = Environment.objects.filter(is_active=True)
+        # Optional: a form submitted without it (or legacy callers) defaults to
+        # 'all' in clean_injection_mode, matching the model default.
+        self.fields["injection_mode"].required = False
+
+    def clean_injection_mode(self):
+        return self.cleaned_data.get("injection_mode") or Script.InjectionMode.ALL
 
     def clean_code(self):
         code = self.cleaned_data.get("code", "").strip()
