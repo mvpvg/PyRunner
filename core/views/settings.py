@@ -240,6 +240,42 @@ def execution_isolation_settings_view(request: HttpRequest) -> HttpResponse:
 
 @login_required
 @require_POST
+def sandbox_test_view(request: HttpRequest) -> JsonResponse:
+    """Probe this host's sandbox capability and cache the result.
+
+    Backs the "Test sandbox on this host" button (sandbox Stage 2). Runs the
+    same probe as ``manage.py sandbox_check`` and stores
+    ``sandbox_capability`` + ``sandbox_checked_at`` on GlobalSettings. This is a
+    convenience gate; the executor re-detects at run time (the real enforcement).
+    """
+    if not request.user.is_superuser:
+        return JsonResponse(
+            {"success": False, "error": "Permission denied."}, status=403
+        )
+
+    from core.services.sandbox import run_and_store_probe
+
+    try:
+        result = run_and_store_probe()
+    except Exception as e:  # never let the probe 500 the settings page
+        logger.exception("Sandbox capability probe failed")
+        return JsonResponse({"success": False, "error": str(e)})
+
+    settings = GlobalSettings.get_settings()
+    return JsonResponse({
+        "success": True,
+        "capability": result.capability,
+        "capability_display": settings.get_sandbox_capability_display(),
+        "tool": result.tool or "",
+        "detail": result.detail,
+        "checked_at": settings.sandbox_checked_at.isoformat()
+        if settings.sandbox_checked_at
+        else "",
+    })
+
+
+@login_required
+@require_POST
 def restart_workers_view(request: HttpRequest) -> JsonResponse:
     """Trigger a worker restart via management command."""
     # Only superusers can restart workers

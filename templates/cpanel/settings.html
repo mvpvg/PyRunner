@@ -516,17 +516,31 @@
                                     {% endif %}
                                 </div>
                                 <div class="flex items-start gap-3 p-3 bg-panel-hi/40 border border-line-soft rounded-lg">
-                                    <span class="mt-0.5 w-2 h-2 rounded-full bg-faint flex-shrink-0"></span>
+                                    {% if settings.sandbox_capability == 'full' %}
+                                        <span class="mt-0.5 w-2 h-2 rounded-full bg-ok flex-shrink-0"></span>
+                                    {% elif settings.sandbox_capability == 'none' %}
+                                        <span class="mt-0.5 w-2 h-2 rounded-full bg-fail flex-shrink-0"></span>
+                                    {% else %}
+                                        <span class="mt-0.5 w-2 h-2 rounded-full bg-faint flex-shrink-0"></span>
+                                    {% endif %}
                                     <div>
                                         <p class="text-text font-medium text-sm">Filesystem / network sandbox</p>
-                                        <p class="text-xs text-muted">
-                                            Not yet available on this instance
-                                            {% if settings.sandbox_checked_at %}— last host check: {{ settings.get_sandbox_capability_display }} ({{ settings.sandbox_checked_at|timesince }} ago){% else %}— host capability not yet tested{% endif %}.
+                                        <p id="sandbox-capability-text" class="text-xs text-muted">
+                                            Host capability: <span class="font-medium text-text">{{ settings.get_sandbox_capability_display }}</span>{% if settings.sandbox_checked_at %} — checked {{ settings.sandbox_checked_at|timesince }} ago{% else %} — not yet tested{% endif %}.
                                         </p>
                                     </div>
                                 </div>
                             </div>
-                            <p class="mt-4 text-xs text-faint">The isolation default and fail-closed switch are stored now and take effect once the filesystem/network sandbox ships in a later release.</p>
+                            <div class="mt-4 p-4 bg-panel-hi/40 border border-line-soft rounded-lg">
+                                <p class="text-text font-medium text-sm">Test sandbox on this host</p>
+                                <p class="text-xs text-muted mb-3">Probe whether this host can create the filesystem/network sandbox (needs unprivileged user namespaces). Re-run after a redeploy — capability can change.</p>
+                                <button type="button" onclick="testSandbox()" id="sandbox-test-btn" class="text-[13px] font-medium px-3.5 py-2 rounded-lg bg-ok text-ink hover:opacity-90 transition flex items-center gap-2">
+                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                                    Test now
+                                </button>
+                                <div id="sandbox-test-result" class="hidden mt-3 text-xs"></div>
+                            </div>
+                            <p class="mt-4 text-xs text-faint">The isolation default and fail-closed switch are stored now and take effect once the filesystem/network sandbox ships in a later release. Resource limits apply on every POSIX host regardless of the sandbox tier.</p>
                         </div>
                     </div>
                 </div>
@@ -1163,6 +1177,51 @@ function runBackupNow() {
     })
     .catch(error => {
         alert('Error: ' + error.message);
+    });
+}
+
+function testSandbox() {
+    const btn = document.getElementById('sandbox-test-btn');
+    const result = document.getElementById('sandbox-test-result');
+    const capText = document.getElementById('sandbox-capability-text');
+    btn.disabled = true;
+    const original = btn.innerHTML;
+    btn.innerHTML = 'Testing…';
+    result.classList.add('hidden');
+
+    fetch('{% url "cpanel:sandbox_test" %}', {
+        method: 'POST',
+        headers: {
+            'X-CSRFToken': document.querySelector('[name=csrfmiddlewaretoken]').value,
+            'Content-Type': 'application/json',
+        },
+    })
+    .then(r => r.json())
+    .then(data => {
+        result.classList.remove('hidden');
+        if (data.success) {
+            const ok = data.capability === 'full';
+            const none = data.capability === 'none';
+            const cls = ok ? 'text-ok' : (none ? 'text-fail' : 'text-warn');
+            result.className = 'mt-3 text-xs ' + cls;
+            result.textContent = `${data.capability_display}${data.tool ? ' (' + data.tool + ')' : ''} — ${data.detail}`;
+            if (capText) {
+                capText.innerHTML = 'Host capability: <span class="font-medium text-text">' +
+                    data.capability_display + '</span> — checked just now.';
+            }
+        } else {
+            result.className = 'mt-3 text-xs text-fail';
+            result.textContent = 'Error: ' + (data.error || 'probe failed');
+        }
+    })
+    .catch(err => {
+        result.classList.remove('hidden');
+        result.className = 'mt-3 text-xs text-fail';
+        result.textContent = 'Error: ' + err.message;
+    })
+    .finally(() => {
+        btn.disabled = false;
+        btn.innerHTML = original;
     });
 }
 
