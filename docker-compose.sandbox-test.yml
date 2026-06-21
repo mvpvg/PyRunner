@@ -1,0 +1,25 @@
+# Sandbox full-feature test override — LOCAL ONLY, reduces container isolation.
+#
+# Why: Docker's default seccomp profile blocks unprivileged user namespaces
+# (it gates unshare/clone-newuser on CAP_SYS_ADMIN), so PyRunner's script
+# sandbox (bwrap/nsjail) can't create its namespaces and degrades to
+# rlimits-only. This override relaxes seccomp for the app container so userns
+# works and the FULL filesystem/network sandbox tier can be exercised and
+# verified on a dev host. (AppArmor is not the blocker on the WSL2 backend —
+# add `- apparmor=unconfined` here too only if a probe still reports an AppArmor
+# denial.)
+#
+# Layer it ON TOP of the Postgres compose (it only adds security_opt):
+#   docker compose -f docker-compose.postgres.yml -f docker-compose.sandbox-test.yml up -d --build
+# or via the helper:
+#   .\run-local-postgres.ps1 -Rebuild -Sandbox -Detached
+#
+# DO NOT use this in production. seccomp=unconfined removes the container's own
+# syscall filter — acceptable for a local sandbox test, not for a real deploy.
+# It is the deliberate trade the host-capability design anticipates: an operator
+# who wants the full sandbox opts into a relaxed container profile.
+
+services:
+  pyrunner:
+    security_opt:
+      - seccomp=unconfined

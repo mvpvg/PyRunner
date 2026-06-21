@@ -74,7 +74,8 @@ param(
     [switch]$Detached,
     [switch]$Logs,
     [switch]$Down,
-    [switch]$Fresh
+    [switch]$Fresh,
+    [switch]$Sandbox
 )
 
 $ErrorActionPreference = 'Stop'
@@ -86,6 +87,10 @@ function Write-Ok($msg)    { Write-Host "    $msg" -ForegroundColor Green }
 function Write-Warn2($msg) { Write-Host "    $msg" -ForegroundColor Yellow }
 
 $ComposeFile = Join-Path $Root 'docker-compose.postgres.yml'
+# Opt-in (-Sandbox): relax the container's seccomp/AppArmor so unprivileged user
+# namespaces work and the FULL script sandbox (bwrap/nsjail) can be tested. Local
+# only — see docker-compose.sandbox-test.yml. Off by default (locked-down parity).
+$SandboxOverride = Join-Path $Root 'docker-compose.sandbox-test.yml'
 
 # --- 1. Verify Docker + Compose ---------------------------------------------
 if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
@@ -110,7 +115,9 @@ if ($LASTEXITCODE -eq 0) {
 
 function Compose {
     param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Rest)
-    $all = @('-f', $ComposeFile) + $Rest
+    $all = @('-f', $ComposeFile)
+    if ($Sandbox) { $all += @('-f', $SandboxOverride) }   # relaxed-seccomp test layer
+    $all += $Rest
     if ($script:UseV2) { & docker compose @all } else { & docker-compose @all }
 }
 
@@ -224,6 +231,12 @@ if ($Rebuild) {
 $upArgs = @('up')
 if (-not $NoBuild -and -not $Rebuild) { $upArgs += '--build' }
 if ($Detached) { $upArgs += '-d' }
+
+if ($Sandbox) {
+    Write-Warn2 "SANDBOX TEST MODE: seccomp relaxed (docker-compose.sandbox-test.yml)."
+    Write-Warn2 "  This lowers the container's own isolation so unprivileged user namespaces"
+    Write-Warn2 "  work and the FULL script sandbox can be tested. Do NOT use this in production."
+}
 
 Write-Step "Starting full PyRunner stack on Postgres (gunicorn + django-q2 + db) -> $url"
 Write-Host "    image:   built from Dockerfile (production)"
