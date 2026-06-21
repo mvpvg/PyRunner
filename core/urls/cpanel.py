@@ -18,6 +18,7 @@ from core.views.scripts import (
     webhook_enable_view,
     webhook_disable_view,
     webhook_regenerate_view,
+    scan_env_refs_view,
 )
 from core.views.runs import run_list_view, run_detail_view
 from core.views.changelog import changelog_view
@@ -44,6 +45,8 @@ from core.views.settings import (
     recaptcha_settings_view,
     retention_settings_view,
     worker_settings_view,
+    execution_isolation_settings_view,
+    sandbox_test_view,
     restart_workers_view,
     manual_cleanup_view,
     cleanup_preview_view,
@@ -54,6 +57,7 @@ from core.views.secrets import (
     secret_create_view,
     secret_edit_view,
     secret_delete_view,
+    secret_picker_view,
 )
 from core.views.tags import (
     tag_list_view,
@@ -123,6 +127,17 @@ from core.views.plugins import (
     plugin_restart_view,
     plugin_restarting_view,
 )
+from core.views.workspaces import (
+    workspace_list_view,
+    workspace_create_view,
+    workspace_rename_view,
+    workspace_delete_view,
+    workspace_sandbox_policy_view,
+    workspace_members_view,
+    workspace_member_add_view,
+    workspace_member_role_view,
+    workspace_member_remove_view,
+)
 
 app_name = "cpanel"
 
@@ -137,6 +152,7 @@ urlpatterns = [
     # Scripts
     path("scripts/", script_list_view, name="script_list"),
     path("scripts/create/", script_create_view, name="script_create"),
+    path("api/scan-env-refs/", scan_env_refs_view, name="scan_env_refs"),
     path("scripts/<uuid:pk>/", script_detail_view, name="script_detail"),
     path("scripts/<uuid:pk>/edit/", script_edit_view, name="script_edit"),
     path("scripts/<uuid:pk>/run/", script_run_view, name="script_run"),
@@ -183,6 +199,7 @@ urlpatterns = [
     # Secrets
     path("secrets/", secret_list_view, name="secret_list"),
     path("secrets/create/", secret_create_view, name="secret_create"),
+    path("api/secret-picker/", secret_picker_view, name="secret_picker"),
     path("secrets/<uuid:pk>/edit/", secret_edit_view, name="secret_edit"),
     path("secrets/<uuid:pk>/delete/", secret_delete_view, name="secret_delete"),
 
@@ -212,6 +229,8 @@ urlpatterns = [
     path("settings/recaptcha/", recaptcha_settings_view, name="recaptcha_settings"),
     path("settings/retention/", retention_settings_view, name="retention_settings"),
     path("settings/workers/", worker_settings_view, name="worker_settings"),
+    path("settings/isolation/", execution_isolation_settings_view, name="execution_isolation_settings"),
+    path("settings/isolation/test/", sandbox_test_view, name="sandbox_test"),
     path("settings/restart-workers/", restart_workers_view, name="restart_workers"),
     path("settings/cleanup/", manual_cleanup_view, name="manual_cleanup"),
     path("settings/cleanup-preview/", cleanup_preview_view, name="cleanup_preview"),
@@ -225,6 +244,17 @@ urlpatterns = [
     path("settings/backup/schedule/", backup_schedule_settings_view, name="backup_schedule_settings"),
     path("settings/backup/schedule/status/", backup_schedule_status_view, name="backup_schedule_status"),
     path("settings/backup/run-now/", backup_run_now_view, name="backup_run_now"),
+
+    # Workspaces (tenancy management — superuser in Stage 0)
+    path("workspaces/", workspace_list_view, name="workspace_list"),
+    path("workspaces/create/", workspace_create_view, name="workspace_create"),
+    path("workspaces/<uuid:pk>/rename/", workspace_rename_view, name="workspace_rename"),
+    path("workspaces/<uuid:pk>/delete/", workspace_delete_view, name="workspace_delete"),
+    path("workspaces/<uuid:pk>/sandbox-policy/", workspace_sandbox_policy_view, name="workspace_sandbox_policy"),
+    path("workspaces/<uuid:pk>/members/", workspace_members_view, name="workspace_members"),
+    path("workspaces/<uuid:pk>/members/add/", workspace_member_add_view, name="workspace_member_add"),
+    path("workspaces/<uuid:pk>/members/<uuid:membership_id>/role/", workspace_member_role_view, name="workspace_member_role"),
+    path("workspaces/<uuid:pk>/members/<uuid:membership_id>/remove/", workspace_member_remove_view, name="workspace_member_remove"),
 
     # User Management
     path("users/", user_list_view, name="user_list"),

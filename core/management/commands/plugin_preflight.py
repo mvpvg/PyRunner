@@ -127,6 +127,49 @@ class Command(BaseCommand):
         except Exception:
             return False, "URL import failed:\n" + traceback.format_exc()
 
+        # 3) Light-import guard (Plugin Platform v2): importing the plugin's apps
+        #    module must NOT transitively import core.models. The settings-time
+        #    light-import pre-check runs BEFORE the app registry is ready, so a
+        #    top-level `from core.models import ...` would crash the boot loader.
+        #    Plugins must import core lazily inside functions, or use the SDK
+        #    (core.plugins.api), which is import-light by design.
+        ok, message = self._assert_light_import(slug)
+        if not ok:
+            return False, message
+
+        return True, ""
+
+    def _assert_light_import(self, slug):
+        """Check (in a clean process) that importing plugins.<slug>.apps does not
+        drag in core.models. Returns (ok, message)."""
+        code = (
+            "import sys\n"
+            f"import plugins.{slug}.apps\n"
+            "sys.exit(7 if 'core.models' in sys.modules else 0)\n"
+        )
+        env = os.environ.copy()
+        env.pop(PREFLIGHT_SLUG_ENV, None)  # plain `-c` import; don't run the loader
+        try:
+            proc = subprocess.run(
+                [sys.executable, "-c", code],
+                cwd=str(settings.BASE_DIR),
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env=env,
+            )
+        except subprocess.TimeoutExpired:
+            return False, "Light-import check timed out."
+        if proc.returncode == 7:
+            return False, (
+                f"Plugin '{slug}': apps.py transitively imports core.models, which "
+                "would break the light-import boot guard. Import core lazily inside "
+                "functions, or use the SDK (core.plugins.api)."
+            )
+        if proc.returncode != 0:
+            return False, (
+                "Light-import check failed:\n" + (proc.stdout + proc.stderr).strip()
+            )
         return True, ""
 
     # -- orchestration ------------------------------------------------------

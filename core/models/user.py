@@ -119,6 +119,16 @@ class MagicToken(models.Model):
             settings.allow_registration = False
             settings.save(update_fields=["allow_registration"])
 
+            # Tenancy: the bootstrap admin owns the default workspace. The
+            # post_save membership signal created a 'member' row at user
+            # creation (is_superuser was still False then); upgrade it to owner.
+            try:
+                from core.models import WorkspaceMembership
+
+                WorkspaceMembership.ensure(user, role=WorkspaceMembership.ROLE_OWNER)
+            except Exception:
+                pass
+
         # Create new token
         return cls.objects.create(
             token=secrets.token_urlsafe(48),

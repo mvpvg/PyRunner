@@ -32,6 +32,9 @@ def superuser_required(view_func):
 def plugin_list_view(request: HttpRequest) -> HttpResponse:
     """List installed plugins with status, errors, and a restart banner."""
     plugins = list(Plugin.objects.all())
+    # Attach owned-resource counts for the delete-confirm preview (Plugin Platform v2).
+    for p in plugins:
+        p.owned_counts = PluginService.owned_resource_counts(p.slug)
     context = {
         "plugins": plugins,
         "pending_restart": PluginService.pending_restart(),
@@ -82,6 +85,8 @@ def plugin_activate_view(request: HttpRequest, pk) -> HttpResponse:
             f'Plugin "{plugin.name}" passed preflight and is now active. '
             "Restart to apply.",
         )
+        if output.strip():  # advisory doctor warnings (non-blocking)
+            messages.warning(request, f"Doctor warnings for \"{plugin.name}\":\n{output}")
     else:
         first = (output or "").strip().splitlines()
         detail = first[-1] if first else "see plugin error for details"

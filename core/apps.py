@@ -15,6 +15,9 @@ class CoreConfig(AppConfig):
         # Register signal handlers for worker heartbeat
         self._register_worker_signals()
 
+        # Ensure every newly-created user lands in a workspace (tenancy Stage 0).
+        self._register_membership_signal()
+
         # Use post_migrate signal to ensure heartbeat schedule exists after migrations
         # This avoids database access during app initialization
         from django.db.models.signals import post_migrate
@@ -25,6 +28,47 @@ class CoreConfig(AppConfig):
         """Run after migrations are complete to set up recurring schedules."""
         self._ensure_heartbeat_schedule()
         self._ensure_update_check_schedule()
+
+    def _register_membership_signal(self):
+        """Ensure a new User always gets a default-workspace membership.
+
+        This is the runtime counterpart to the 0031 backfill (which covers
+        users that already existed). Without it an invited/created user would
+        have zero memberships and the active-workspace middleware couldn't
+        resolve a workspace for them. Idempotent and best-effort — it must never
+        block user creation.
+        """
+        from django.db.models.signals import post_save
+
+        def ensure_membership(sender, instance, created, **kwargs):
+            if not created:
+                return
+            try:
+                from core.models import Workspace, WorkspaceMembership
+
+                default = Workspace.get_default()
+                if default is None:
+                    return
+                role = (
+                    WorkspaceMembership.ROLE_OWNER
+                    if instance.is_superuser
+                    else WorkspaceMembership.ROLE_MEMBER
+                )
+                WorkspaceMembership.ensure(instance, default, role=role)
+            except Exception:
+                pass  # Never break user creation on membership bookkeeping.
+
+        from core.models import User
+
+        # weak=False is REQUIRED: ensure_membership is a local closure with no
+        # other strong reference, so a weak connection (the default) would be
+        # garbage-collected after ready() returns and the signal would never fire.
+        post_save.connect(
+            ensure_membership,
+            sender=User,
+            dispatch_uid="ensure_workspace_membership",
+            weak=False,
+        )
 
     def _register_worker_signals(self):
         """Register django-q2 signals for worker heartbeat."""

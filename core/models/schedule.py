@@ -8,6 +8,7 @@ from django.conf import settings
 from django.db import models
 
 from .script import Script
+from .workspace import WorkspaceScopedManager
 
 
 class ScriptSchedule(models.Model):
@@ -41,6 +42,19 @@ class ScriptSchedule(models.Model):
         on_delete=models.CASCADE,
         related_name="schedule",
     )
+
+    # Tenancy seam (Phase A): nullable, backfilled to the default workspace.
+    workspace = models.ForeignKey(
+        "core.Workspace",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        db_index=True,
+        related_name="schedules",
+        help_text="Workspace this schedule belongs to (tenancy seam; nullable).",
+    )
+
+    objects = WorkspaceScopedManager()
 
     # Run mode selection
     run_mode = models.CharField(

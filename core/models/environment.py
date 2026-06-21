@@ -10,6 +10,8 @@ from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import models
 
+from .workspace import WorkspaceScopedManager
+
 
 def validate_environment_path(value: str) -> None:
     """
@@ -53,6 +55,20 @@ class Environment(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=100)
     description = models.TextField(blank=True)
+
+    # Tenancy seam (Phase A): nullable, backfilled to the default workspace.
+    # Environments stay SHARED infrastructure; this is organizational metadata.
+    workspace = models.ForeignKey(
+        "core.Workspace",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        db_index=True,
+        related_name="environments",
+        help_text="Workspace this resource belongs to (tenancy seam; nullable).",
+    )
+
+    objects = WorkspaceScopedManager()
 
     # Path relative to ENVIRONMENTS_ROOT
     path = models.CharField(

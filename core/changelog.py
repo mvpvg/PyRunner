@@ -8,6 +8,72 @@ When you cut a release, bump ``pyrunner/version.py`` and add an entry here.
 
 CHANGELOG = [
     {
+        "version": "1.11.0",
+        "date": "June 21, 2026",
+        "headline": (
+            "Plugin Platform v2 — develop plugins live, build them on a stable "
+            "SDK, and let them own their own scripts, secrets, and data with no "
+            "risk to your core database."
+        ),
+        "changes": [
+            {
+                "tag": "Added",
+                "title": "Plugin Dev Mode",
+                "body": (
+                    "Point PYRUNNER_PLUGIN_DEV at a local plugin folder under "
+                    "`manage.py runserver` and edit it live — code and templates "
+                    "reload instantly, with no upload, preflight, or restart. "
+                    "Triple-guarded so it never loads on a production server."
+                ),
+            },
+            {
+                "tag": "Added",
+                "title": "Plugin SDK (core.plugins.api)",
+                "body": (
+                    "Plugins now orchestrate scripts, secrets, datastores, "
+                    "schedules, and runs through a stable, versioned SDK instead of "
+                    "reaching into core internals. It auto-stamps ownership + the "
+                    "workspace, is idempotent (re-saving config updates the same "
+                    "rows, never duplicates), and runs everything through the real "
+                    "execution + scheduling paths."
+                ),
+            },
+            {
+                "tag": "Added",
+                "title": "Resource ownership + scoped secrets",
+                "body": (
+                    "Scripts, secrets, and datastores a plugin creates are grouped "
+                    "under it with an owner pill, delete-guarded on the generic "
+                    "pages (so you can't pull the rug out from under a plugin), and "
+                    "removed cleanly on uninstall. Secrets can be injected per "
+                    "script (Selected mode) instead of all-at-once — fully opt-in, "
+                    "so existing scripts are unchanged."
+                ),
+            },
+            {
+                "tag": "Added",
+                "title": "Plugin doctor",
+                "body": (
+                    "Activation now runs a static-lint 'doctor' that refuses a "
+                    "rule-breaking plugin with a clear per-rule report — before any "
+                    "of its code or migrations can run. Plugins ship no database "
+                    "models, so no plugin can ever alter a core table. Authors can "
+                    "run `manage.py plugin_doctor` on a folder before shipping."
+                ),
+            },
+            {
+                "tag": "Security",
+                "title": "No plugin DDL reaches the database",
+                "body": (
+                    "Plugins persist via owned key-value DataStores, not their own "
+                    "tables. With no plugin models or migrations, the entire class "
+                    "of 'a plugin migration broke the database' is removed by "
+                    "construction — verified live against Postgres."
+                ),
+            },
+        ],
+    },
+    {
         "version": "1.10.0",
         "date": "June 15, 2026",
         "headline": (

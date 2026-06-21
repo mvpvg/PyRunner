@@ -8,6 +8,7 @@ from django.conf import settings
 from django.db import models
 
 from .script import Script
+from .workspace import WorkspaceScopedManager
 
 
 class Run(models.Model):
@@ -35,6 +36,19 @@ class Run(models.Model):
         on_delete=models.CASCADE,
         related_name="runs",
     )
+
+    # Tenancy seam (Phase A): nullable, backfilled to the default workspace.
+    workspace = models.ForeignKey(
+        "core.Workspace",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        db_index=True,
+        related_name="runs",
+        help_text="Workspace this run belongs to (tenancy seam; nullable).",
+    )
+
+    objects = WorkspaceScopedManager()
 
     # Execution status
     status = models.CharField(

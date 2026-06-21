@@ -88,6 +88,8 @@ class ScriptForm(forms.ModelForm):
             "tags",
             "timeout_seconds",
             "is_enabled",
+            "isolation_mode",
+            "injection_mode",
             "notify_on",
             "notify_email",
             "notify_webhook_url",
@@ -117,6 +119,8 @@ class ScriptForm(forms.ModelForm):
                 attrs={"class": INPUT_CLASS, "min": 1, "max": 86400}
             ),
             "is_enabled": forms.CheckboxInput(attrs={"class": CHECK_CLASS}),
+            "isolation_mode": forms.Select(attrs={"class": INPUT_CLASS}),
+            "injection_mode": forms.Select(attrs={"class": INPUT_CLASS}),
             "notify_on": forms.Select(attrs={"class": INPUT_CLASS}),
             "notify_email": forms.EmailInput(
                 attrs={
@@ -140,6 +144,8 @@ class ScriptForm(forms.ModelForm):
             "tags": "Tags",
             "timeout_seconds": "Timeout (seconds)",
             "is_enabled": "Enabled",
+            "isolation_mode": "Execution Isolation",
+            "injection_mode": "Secret injection",
             "notify_on": "Notify On",
             "notify_email": "Notification Email",
             "notify_webhook_url": "Webhook URL",
@@ -147,6 +153,8 @@ class ScriptForm(forms.ModelForm):
         }
         help_texts = {
             "timeout_seconds": "Maximum execution time (1 second to 24 hours)",
+            "isolation_mode": "Run sandboxed. Effective only when the workspace policy is 'optional' (a 'required' workspace always sandboxes).",
+            "injection_mode": "All = every workspace secret (default). Selected = only the secrets you attach below.",
             "notify_email": "Leave empty to use global default",
             "notify_webhook_url": "URL to POST notifications to when script completes",
         }
@@ -155,6 +163,12 @@ class ScriptForm(forms.ModelForm):
         super().__init__(*args, **kwargs)
         # Only show active environments
         self.fields["environment"].queryset = Environment.objects.filter(is_active=True)
+        # Optional: a form submitted without it (or legacy callers) defaults to
+        # 'all' in clean_injection_mode, matching the model default.
+        self.fields["injection_mode"].required = False
+
+    def clean_injection_mode(self):
+        return self.cleaned_data.get("injection_mode") or Script.InjectionMode.ALL
 
     def clean_code(self):
         code = self.cleaned_data.get("code", "").strip()
@@ -614,6 +628,12 @@ class BulkInstallForm(forms.Form):
 class SecretCreateForm(forms.Form):
     """Form for creating a new secret."""
 
+    def __init__(self, *args, workspace=None, **kwargs):
+        # The active workspace scopes the key-uniqueness check (tenancy Stage 3:
+        # secret keys are unique per workspace, not globally).
+        self._workspace = workspace
+        super().__init__(*args, **kwargs)
+
     key = forms.CharField(
         max_length=100,
         widget=forms.TextInput(
@@ -683,11 +703,17 @@ class SecretCreateForm(forms.Form):
                 f"'{key}' is a reserved environment variable name."
             )
 
-        # Check if key already exists
+        # Check if key already exists within the active workspace (keys are
+        # per-workspace, so two workspaces can each own an API_KEY).
         from core.models import Secret
 
-        if Secret.objects.filter(key=key).exists():
-            raise forms.ValidationError(f"A secret with key '{key}' already exists.")
+        qs = Secret.objects.filter(key=key)
+        if self._workspace is not None:
+            qs = qs.filter(workspace=self._workspace)
+        if qs.exists():
+            raise forms.ValidationError(
+                f"A secret with key '{key}' already exists in this workspace."
+            )
 
         return key
 
@@ -1250,6 +1276,107 @@ class WorkerSettingsForm(forms.Form):
         return instance
 
 
+class ExecutionIsolationForm(forms.Form):
+    """Form for the script-execution sandbox (FOUNDATIONS Seam 2, Stage 1).
+
+    Dashboard-managed, stored on ``GlobalSettings`` and resolved per-run at
+    execution time (no restart). Mirrors ``WorkerSettingsForm``. In Stage 1 the
+    resource limits below are active immediately; the isolation *mode* is stored
+    for the later filesystem/network sandbox stage.
+    """
+
+    from core.models import GlobalSettings
+
+    SANDBOX_MODE_CHOICES = GlobalSettings.SandboxMode.choices
+
+    sandbox_default = forms.ChoiceField(
+        choices=SANDBOX_MODE_CHOICES,
+        initial=GlobalSettings.SandboxMode.OFF,
+        widget=forms.Select(attrs={"class": INPUT_CLASS}),
+        label="Isolation default",
+        help_text="Instance-wide default. Gates the filesystem/network sandbox "
+        "(a later stage); the resource limits below apply regardless.",
+    )
+
+    sandbox_fail_closed = forms.BooleanField(
+        required=False,
+        initial=False,
+        widget=forms.CheckboxInput(attrs={"class": CHECK_CLASS}),
+        label="Fail closed",
+        help_text="When a required sandbox is unavailable on the host, fail the "
+        "run instead of degrading to a lower tier with a warning.",
+    )
+
+    sandbox_rlimit_memory_mb = forms.IntegerField(
+        min_value=0,
+        max_value=1048576,
+        initial=0,
+        widget=forms.NumberInput(attrs={"class": INPUT_CLASS, "min": 0}),
+        label="Memory limit (MB)",
+        help_text="Per-run address-space cap (RLIMIT_AS). 0 = unlimited. POSIX only.",
+    )
+
+    sandbox_rlimit_cpu_seconds = forms.IntegerField(
+        min_value=0,
+        max_value=86400,
+        initial=0,
+        widget=forms.NumberInput(attrs={"class": INPUT_CLASS, "min": 0}),
+        label="CPU time limit (seconds)",
+        help_text="Per-run CPU-time cap (RLIMIT_CPU). 0 = unlimited. POSIX only.",
+    )
+
+    sandbox_rlimit_nproc = forms.IntegerField(
+        min_value=0,
+        max_value=100000,
+        initial=0,
+        widget=forms.NumberInput(attrs={"class": INPUT_CLASS, "min": 0}),
+        label="Process limit",
+        help_text="Per-run process/thread cap (RLIMIT_NPROC, fork-bomb guard). "
+        "0 = unlimited. POSIX only.",
+    )
+
+    sandbox_rlimit_fsize_mb = forms.IntegerField(
+        min_value=0,
+        max_value=1048576,
+        initial=0,
+        widget=forms.NumberInput(attrs={"class": INPUT_CLASS, "min": 0}),
+        label="Max file size (MB)",
+        help_text="Per-run largest single-file write (RLIMIT_FSIZE). 0 = unlimited. POSIX only.",
+    )
+
+    def __init__(self, *args, instance=None, **kwargs):
+        """Initialize form with existing settings."""
+        super().__init__(*args, **kwargs)
+        if instance:
+            self.fields["sandbox_default"].initial = instance.sandbox_default
+            self.fields["sandbox_fail_closed"].initial = instance.sandbox_fail_closed
+            self.fields["sandbox_rlimit_memory_mb"].initial = instance.sandbox_rlimit_memory_mb
+            self.fields["sandbox_rlimit_cpu_seconds"].initial = instance.sandbox_rlimit_cpu_seconds
+            self.fields["sandbox_rlimit_nproc"].initial = instance.sandbox_rlimit_nproc
+            self.fields["sandbox_rlimit_fsize_mb"].initial = instance.sandbox_rlimit_fsize_mb
+
+    def save(self, instance):
+        """Save the isolation settings to the GlobalSettings instance."""
+        instance.sandbox_default = self.cleaned_data["sandbox_default"]
+        instance.sandbox_fail_closed = self.cleaned_data.get("sandbox_fail_closed", False)
+        instance.sandbox_rlimit_memory_mb = self.cleaned_data.get("sandbox_rlimit_memory_mb") or 0
+        instance.sandbox_rlimit_cpu_seconds = self.cleaned_data.get("sandbox_rlimit_cpu_seconds") or 0
+        instance.sandbox_rlimit_nproc = self.cleaned_data.get("sandbox_rlimit_nproc") or 0
+        instance.sandbox_rlimit_fsize_mb = self.cleaned_data.get("sandbox_rlimit_fsize_mb") or 0
+        instance.save(
+            update_fields=[
+                "sandbox_default",
+                "sandbox_fail_closed",
+                "sandbox_rlimit_memory_mb",
+                "sandbox_rlimit_cpu_seconds",
+                "sandbox_rlimit_nproc",
+                "sandbox_rlimit_fsize_mb",
+                "updated_at",
+            ]
+        )
+        return instance
+
+
 class BackupCreateForm(forms.Form):
     """Form for configuring backup creation."""
 
@@ -1365,6 +1492,12 @@ class BackupRestoreForm(forms.Form):
 class DataStoreForm(forms.ModelForm):
     """Form for creating and editing data stores."""
 
+    def __init__(self, *args, workspace=None, **kwargs):
+        # The active workspace scopes the name-uniqueness check (tenancy: names
+        # are unique per workspace, not globally).
+        self._workspace = workspace
+        super().__init__(*args, **kwargs)
+
     class Meta:
         model = DataStore
         fields = ["name", "description"]
@@ -1400,12 +1533,16 @@ class DataStoreForm(forms.ModelForm):
             raise forms.ValidationError(
                 "Name can only contain letters, numbers, underscores, and hyphens."
             )
-        # Check uniqueness (excluding current instance for edits)
+        # Check uniqueness within the active workspace (names are per-workspace).
         qs = DataStore.objects.filter(name__iexact=name)
+        if self._workspace is not None:
+            qs = qs.filter(workspace=self._workspace)
         if self.instance.pk:
             qs = qs.exclude(pk=self.instance.pk)
         if qs.exists():
-            raise forms.ValidationError("A data store with this name already exists.")
+            raise forms.ValidationError(
+                "A data store with this name already exists in this workspace."
+            )
         return name
 
 
@@ -1522,12 +1659,18 @@ class DataStoreAPITokenForm(forms.ModelForm):
             "expires_at": "Optional. Leave empty for no expiration.",
         }
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, workspace=None, **kwargs):
         super().__init__(*args, **kwargs)
         # Make datastore optional with a clear empty choice
         self.fields["datastore"].required = False
         self.fields["datastore"].empty_label = "All Datastores (Global Access)"
         self.fields["expires_at"].required = False
+        # Scope the datastore choices to the active workspace (tenancy Stage 3),
+        # so a token can't be bound to another workspace's datastore.
+        if workspace is not None:
+            self.fields["datastore"].queryset = DataStore.objects.for_workspace(
+                workspace
+            )
 
 
 # =============================================================================

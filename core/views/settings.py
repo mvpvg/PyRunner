@@ -4,6 +4,7 @@ Settings views for the control panel.
 import logging
 
 from django.shortcuts import render, redirect
+from django.urls import reverse
 from django.contrib.auth.decorators import login_required, user_passes_test
 from django.contrib import messages
 from django.views.decorators.http import require_POST
@@ -20,6 +21,7 @@ from core.forms import (
     GeneralSettingsForm,
     LogRetentionForm,
     WorkerSettingsForm,
+    ExecutionIsolationForm,
     BackupCreateForm,
     BackupRestoreForm,
     S3BackupScheduleForm,
@@ -45,6 +47,7 @@ def settings_view(request: HttpRequest) -> HttpResponse:
     general_form = GeneralSettingsForm(instance=settings)
     retention_form = LogRetentionForm(instance=settings)
     worker_form = WorkerSettingsForm(instance=settings)
+    isolation_form = ExecutionIsolationForm(instance=settings)
     backup_create_form = BackupCreateForm()
     backup_restore_form = BackupRestoreForm()
     backup_schedule_form = S3BackupScheduleForm(instance=settings)
@@ -60,6 +63,7 @@ def settings_view(request: HttpRequest) -> HttpResponse:
             "general_form": general_form,
             "retention_form": retention_form,
             "worker_form": worker_form,
+            "isolation_form": isolation_form,
             "backup_create_form": backup_create_form,
             "backup_restore_form": backup_restore_form,
             "backup_schedule_form": backup_schedule_form,
@@ -209,6 +213,65 @@ def worker_settings_view(request: HttpRequest) -> HttpResponse:
                 messages.error(request, f"{field}: {error}")
 
     return redirect("cpanel:settings")
+
+
+@login_required
+@superuser_required
+@require_POST
+def execution_isolation_settings_view(request: HttpRequest) -> HttpResponse:
+    """Update script-execution isolation (sandbox) settings.
+
+    Dashboard-managed config for FOUNDATIONS Seam 2 (Stage 1): the per-run
+    resource limits resolved at execution time. No restart required.
+    """
+    settings = GlobalSettings.get_settings()
+    form = ExecutionIsolationForm(request.POST, instance=settings)
+
+    if form.is_valid():
+        form.save(settings)
+        messages.success(request, "Execution & isolation settings saved successfully.")
+    else:
+        for field, errors in form.errors.items():
+            for error in errors:
+                messages.error(request, f"{field}: {error}")
+
+    return redirect(reverse("cpanel:settings") + "#isolation")
+
+
+@login_required
+@require_POST
+def sandbox_test_view(request: HttpRequest) -> JsonResponse:
+    """Probe this host's sandbox capability and cache the result.
+
+    Backs the "Test sandbox on this host" button (sandbox Stage 2). Runs the
+    same probe as ``manage.py sandbox_check`` and stores
+    ``sandbox_capability`` + ``sandbox_checked_at`` on GlobalSettings. This is a
+    convenience gate; the executor re-detects at run time (the real enforcement).
+    """
+    if not request.user.is_superuser:
+        return JsonResponse(
+            {"success": False, "error": "Permission denied."}, status=403
+        )
+
+    from core.services.sandbox import run_and_store_probe
+
+    try:
+        result = run_and_store_probe()
+    except Exception as e:  # never let the probe 500 the settings page
+        logger.exception("Sandbox capability probe failed")
+        return JsonResponse({"success": False, "error": str(e)})
+
+    settings = GlobalSettings.get_settings()
+    return JsonResponse({
+        "success": True,
+        "capability": result.capability,
+        "capability_display": settings.get_sandbox_capability_display(),
+        "tool": result.tool or "",
+        "detail": result.detail,
+        "checked_at": settings.sandbox_checked_at.isoformat()
+        if settings.sandbox_checked_at
+        else "",
+    })
 
 
 @login_required

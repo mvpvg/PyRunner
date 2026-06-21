@@ -35,7 +35,16 @@ SECRET_KEY = os.environ["SECRET_KEY"]
 # Defaults to False for security - set DEBUG=True explicitly for development
 DEBUG = os.environ.get("DEBUG", "False").lower() == "true"
 
-ALLOWED_HOSTS = os.environ.get("ALLOWED_HOSTS", "localhost,127.0.0.1").split(",")
+ALLOWED_HOSTS = [h.strip() for h in os.environ.get("ALLOWED_HOSTS", "localhost,127.0.0.1").split(",") if h.strip()]
+
+# Always accept loopback hosts, regardless of the operator's ALLOWED_HOSTS. The
+# in-container healthcheck already calls http://localhost:8000/, and Seam 1's
+# internal datastore endpoint is reached over loopback by the worker — neither
+# should break when an operator narrows ALLOWED_HOSTS to their public domain.
+# Purely additive: it only ever widens the allow-list.
+for _loopback_host in ("localhost", "127.0.0.1", "[::1]"):
+    if _loopback_host not in ALLOWED_HOSTS:
+        ALLOWED_HOSTS.append(_loopback_host)
 
 
 # Application definition
@@ -74,6 +83,9 @@ MIDDLEWARE = [
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
     "core.middleware.SetupWizardMiddleware",
+    # Tenancy (Decision 1): resolve request.workspace from the optional /w/<id>/
+    # URL prefix. Last so request.user + the URL kwarg are both available.
+    "core.middleware.ActiveWorkspaceMiddleware",
 ]
 
 ROOT_URLCONF = "pyrunner.urls"
@@ -90,6 +102,7 @@ TEMPLATES = [
                 "django.contrib.messages.context_processors.messages",
                 "core.context_processors.pyrunner_version",
                 "core.context_processors.plugin_nav",
+                "core.context_processors.workspaces",
             ],
         },
     },
@@ -101,15 +114,30 @@ WSGI_APPLICATION = "pyrunner.wsgi.application"
 # Database
 # https://docs.djangoproject.com/en/6.0/ref/settings/#databases
 
-DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.sqlite3",
-        "NAME": BASE_DIR / "data" / "db.sqlite3",
-        "OPTIONS": {
-            "timeout": 30,  # Wait up to 30 seconds for database lock
-        },
+# SQLite is the zero-config default. Set DATABASE_URL (e.g.
+# postgres://user:pass@host:5432/pyrunner) to run on Postgres instead — that one
+# env var is the entire engine switch. Unset => SQLite, byte-for-byte as before.
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+if DATABASE_URL:
+    import dj_database_url
+
+    DATABASES = {
+        "default": dj_database_url.parse(
+            DATABASE_URL,
+            conn_max_age=int(os.environ.get("DB_CONN_MAX_AGE", "600")),
+            conn_health_checks=True,
+        ),
     }
-}
+else:
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.sqlite3",
+            "NAME": BASE_DIR / "data" / "db.sqlite3",
+            "OPTIONS": {
+                "timeout": 30,  # Wait up to 30 seconds for database lock
+            },
+        }
+    }
 
 
 # Enable SQLite WAL mode for better concurrency in multi-process environments
@@ -153,22 +181,40 @@ def _plugin_slug_ok(slug):
 
 
 def _active_plugin_slugs():
-    """Active plugin slugs, read straight from sqlite at import time.
+    """Active plugin slugs, read from the DB at import time (before apps load).
 
-    Mirrors `_get_q_cluster_config()`'s "read the DB before Django is ready"
-    pattern, but with a read-only connection so it can never create or lock the
-    database. Fully guarded: a missing table (pre-migrate), an absent/locked db,
-    or any other error yields an empty list — never an exception.
+    Engine-aware: a read-only sqlite connection on SQLite (can never create or
+    lock the file), psycopg on Postgres. Fully guarded: a missing table
+    (pre-migrate), an absent/locked/unreachable db, or any other error yields an
+    empty list — never an exception (so a DB hiccup can never stop the boot).
     """
-    db_path = DATABASES["default"]["NAME"]
+    db = DATABASES["default"]
     try:
-        con = _sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-        try:
-            rows = con.execute(
-                "SELECT slug FROM plugins WHERE status = 'active'"
-            ).fetchall()
-        finally:
-            con.close()
+        if "postgresql" in db.get("ENGINE", ""):
+            import psycopg
+
+            conn = psycopg.connect(
+                dbname=db.get("NAME") or None,
+                user=db.get("USER") or None,
+                password=db.get("PASSWORD") or None,
+                host=db.get("HOST") or None,
+                port=db.get("PORT") or None,
+                connect_timeout=5,
+            )
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT slug FROM plugins WHERE status = 'active'")
+                    rows = cur.fetchall()
+            finally:
+                conn.close()
+        else:
+            con = _sqlite3.connect(f"file:{db['NAME']}?mode=ro", uri=True)
+            try:
+                rows = con.execute(
+                    "SELECT slug FROM plugins WHERE status = 'active'"
+                ).fetchall()
+            finally:
+                con.close()
     except Exception:
         return []
     return [r[0] for r in rows if _plugin_slug_ok(r[0])]
@@ -210,6 +256,75 @@ else:
             INSTALLED_PLUGINS.append(f"plugins.{_slug}")
         else:
             PLUGIN_LOAD_ERRORS[_slug] = _err
+
+
+# --- Plugin Dev Mode (Plugin Platform v2, WS1) ------------------------------
+# Load ONE plugin straight from a local folder under `manage.py runserver`, with
+# Django's StatReloader giving live .py/template reload — no zip, no upload, no
+# preflight, no restart. This is purely a developer convenience and is gated so
+# it can NEVER run in production.
+#
+# Triple guard (all three required):
+#   DEBUG                       — never in a production (DEBUG=False) process.
+#   PYRUNNER_PLUGIN_DEV (path)  — the dev folder; unset by default.
+#   RUN_MAIN                    — set only in the runserver reloader CHILD, so
+#                                 the plugin registers exactly once (the parent
+#                                 watcher process must not also load it, which
+#                                 would double-register / fight for the DB).
+# The gunicorn/WSGI path never sets RUN_MAIN, so this block is inert there even
+# if DEBUG and the var were somehow both set.
+#
+# Mechanism: the dev folder is named for the slug and lives anywhere on disk. We
+# splice its PARENT onto the `plugins` package __path__, so `plugins.<slug>`
+# resolves to it — meaning the plugin's apps.py/urls.py (name="plugins.<slug>",
+# app_name="<slug>") are byte-identical to the eventual shipped form. The
+# existing per-plugin URL mount loop in pyrunner/urls.py then picks it up from
+# INSTALLED_PLUGINS with no special-casing.
+#
+# Kept deliberately self-contained (imports nothing from `core`, mirroring the
+# loader above): a failure here is recorded and swallowed, never fatal to boot.
+DEV_PLUGIN = None  # full app path ("plugins.<slug>") of the dev plugin, if loaded
+_dev_plugin_path = os.environ.get("PYRUNNER_PLUGIN_DEV", "").strip()
+if DEBUG and _dev_plugin_path and os.environ.get("RUN_MAIN"):
+    try:
+        _dev_dir = Path(_dev_plugin_path).expanduser().resolve()
+        _dev_slug = _dev_dir.name
+        if not _dev_dir.is_dir():
+            raise FileNotFoundError(f"dev plugin path is not a directory: {_dev_dir}")
+        if not _plugin_slug_ok(_dev_slug):
+            raise ValueError(
+                f"dev plugin folder name {_dev_slug!r} is not a valid slug "
+                "(lowercase letter, then letters/digits/underscores)"
+            )
+        if not (_dev_dir / "apps.py").exists():
+            raise FileNotFoundError(f"dev plugin {_dev_dir} is missing apps.py")
+
+        # Splice the dev folder's parent into the plugins package search path so
+        # `import plugins.<slug>` resolves to it. Importing the (trivial) plugins
+        # package is safe — it is not a core import.
+        import plugins as _plugins_pkg
+
+        _dev_parent = str(_dev_dir.parent)
+        if _dev_parent not in _plugins_pkg.__path__:
+            _plugins_pkg.__path__.append(_dev_parent)
+
+        _dev_app = f"plugins.{_dev_slug}"
+        if _dev_app in INSTALLED_PLUGINS:
+            # An installed+active plugin of the same slug is already loaded from
+            # PLUGINS_DIR (which is searched first); don't shadow it.
+            PLUGIN_LOAD_ERRORS[_dev_slug] = (
+                "dev plugin not loaded: a plugin with this slug is already active"
+            )
+        else:
+            _ok, _err = _light_import_ok(_dev_slug)
+            if _ok:
+                INSTALLED_APPS.append(_dev_app)
+                INSTALLED_PLUGINS.append(_dev_app)
+                DEV_PLUGIN = _dev_app
+            else:
+                PLUGIN_LOAD_ERRORS[_dev_slug] = _err
+    except Exception as _dev_exc:  # never let a dev misconfig stop the server
+        PLUGIN_LOAD_ERRORS[_dev_plugin_path or "?"] = repr(_dev_exc)
 
 
 # Custom User Model
@@ -486,15 +601,24 @@ if not DEBUG:
     SECURE_SSL_REDIRECT = os.environ.get("SECURE_SSL_REDIRECT", "True").lower() == "true"
     SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 
+    # Never 301 the internal loopback datastore endpoint (Seam 1) to https — the
+    # worker calls it over plain-http loopback and there is no TLS listener
+    # there. Matched (regex) against request.path without the leading slash.
+    SECURE_REDIRECT_EXEMPT = [r"^internal/"]
+
     # HSTS - HTTP Strict Transport Security
     # Start with a shorter duration, increase to 31536000 (1 year) once confirmed working
     SECURE_HSTS_SECONDS = int(os.environ.get("SECURE_HSTS_SECONDS", "2592000"))  # 30 days default
     SECURE_HSTS_INCLUDE_SUBDOMAINS = os.environ.get("SECURE_HSTS_INCLUDE_SUBDOMAINS", "True").lower() == "true"
     SECURE_HSTS_PRELOAD = os.environ.get("SECURE_HSTS_PRELOAD", "False").lower() == "true"
 
-    # Cookie Security
-    SESSION_COOKIE_SECURE = True
-    CSRF_COOKIE_SECURE = True
+    # Cookie Security. Default True (secure) — correct for HTTPS and for an
+    # edge-TLS proxy (Coolify) where SECURE_PROXY_SSL_HEADER marks requests
+    # secure. Overridable to False for a genuine plain-http deployment (e.g. a
+    # local Docker run), where a Secure cookie would never be sent back and would
+    # silently log the user out on every request.
+    SESSION_COOKIE_SECURE = os.environ.get("SESSION_COOKIE_SECURE", "True").lower() == "true"
+    CSRF_COOKIE_SECURE = os.environ.get("CSRF_COOKIE_SECURE", "True").lower() == "true"
 
 # Always-on security settings (regardless of DEBUG)
 SECURE_CONTENT_TYPE_NOSNIFF = True
@@ -516,3 +640,27 @@ API_RATE_LIMIT = int(os.environ.get("API_RATE_LIMIT", "60"))
 # CORS settings for API endpoints
 # Set to "*" to allow all origins (suitable for self-hosted), or comma-separated origins
 API_CORS_ORIGINS = os.environ.get("API_CORS_ORIGINS", "*")
+
+# Base URL the worker uses to reach the internal loopback API (Seam 1 datastore
+# endpoint + Claude-usage recorder) when there is no local DB file (Postgres).
+# Derived from the actual gunicorn bind (PORT) so it is never a wrong hardcoded
+# port; overridable for unusual topologies. Loopback by design.
+PYRUNNER_INTERNAL_BASE_URL = os.environ.get(
+    "PYRUNNER_INTERNAL_BASE_URL", f"http://127.0.0.1:{os.environ.get('PORT', '8000')}"
+)
+
+# Per-run env hardening: PyRunner's own infra secrets are never copied into a
+# script's environment (scripts get their own values via the Secrets feature).
+PYRUNNER_RUN_ENV_DENYLIST = [
+    v.strip()
+    for v in os.environ.get(
+        "PYRUNNER_RUN_ENV_DENYLIST", "ENCRYPTION_KEY,SECRET_KEY,DATABASE_URL"
+    ).split(",")
+    if v.strip()
+]
+
+# Optional per-run resource limits (posix only; a no-op on Windows). 0 = off.
+# Applied via resource.setrlimit in the child before exec.
+PYRUNNER_RUN_RLIMIT_MEMORY_MB = int(os.environ.get("PYRUNNER_RUN_RLIMIT_MEMORY_MB", "0"))
+PYRUNNER_RUN_RLIMIT_CPU_SECONDS = int(os.environ.get("PYRUNNER_RUN_RLIMIT_CPU_SECONDS", "0"))
+PYRUNNER_RUN_RLIMIT_NPROC = int(os.environ.get("PYRUNNER_RUN_RLIMIT_NPROC", "0"))

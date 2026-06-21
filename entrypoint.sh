@@ -48,14 +48,24 @@ if [ ! -f "$PLUGINS_DIR/__init__.py" ]; then
     echo "# PyRunner plugins package (auto-seeded). Do not delete." > "$PLUGINS_DIR/__init__.py"
 fi
 
-# Seed the bundled example plugin on first boot only (INSTALLED, never active),
-# so a fresh deployment has an example to look at / try / delete. Idempotent and
-# never fatal.
-echo "[*] Seeding example plugin (first boot only)..."
-PYRUNNER_DISABLE_PLUGINS=1 python manage.py seed_example_plugin || true
+# Plugin Dev Mode (Plugin Platform v2, WS1): when PYRUNNER_PLUGIN_DEV points at a
+# local plugin folder, there is no installed/active plugin set to seed or
+# preflight — the dev plugin loads live under runserver (which sets RUN_MAIN),
+# never under this gunicorn boot path. Skip both steps so a dev folder can't
+# stall startup. (Note: this container boot still runs gunicorn, which never
+# loads the dev plugin; dev iteration uses `manage.py runserver`.)
+if [ -n "$PYRUNNER_PLUGIN_DEV" ]; then
+    echo "[*] Dev mode active: local plugin '$PYRUNNER_PLUGIN_DEV' — skipping seed + preflight."
+else
+    # Seed the bundled example plugin on first boot only (INSTALLED, never active),
+    # so a fresh deployment has an example to look at / try / delete. Idempotent and
+    # never fatal.
+    echo "[*] Seeding example plugin (first boot only)..."
+    PYRUNNER_DISABLE_PLUGINS=1 python manage.py seed_example_plugin || true
 
-echo "[*] Preflighting plugins..."
-PYRUNNER_DISABLE_PLUGINS=1 python manage.py plugin_preflight --all --disable-broken || true
+    echo "[*] Preflighting plugins..."
+    PYRUNNER_DISABLE_PLUGINS=1 python manage.py plugin_preflight --all --disable-broken || true
+fi
 
 echo ""
 echo "[*] Starting services..."

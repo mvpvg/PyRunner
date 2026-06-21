@@ -192,6 +192,61 @@ class PluginService:
                 h.update(path.read_bytes())
         return h.hexdigest()
 
+    # ----------------------------------------------------------------- dev mode
+
+    @staticmethod
+    def validate_dev_mode_plugin(local_path) -> tuple[str, list]:
+        """Validate a local plugin folder for Dev Mode (Plugin Platform v2, WS1).
+
+        Mirrors the structural checks the ``settings.py`` dev-load block performs,
+        but as an importable, testable helper for tests and the future
+        ``plugin_doctor --path``. It NEVER imports/executes the plugin code,
+        touches disk, or applies migrations — it only inspects the folder layout.
+
+        The folder name is the slug; the plugin is loaded under runserver as
+        ``plugins.<slug>`` (its ``apps.py`` declares ``name="plugins.<slug>"``),
+        so the dev form is byte-identical to the eventual shipped form.
+
+        Returns ``(slug, warnings)``. ``warnings`` flags v2 rule violations that
+        the activation doctor (Stage 4) will later enforce but that do not block
+        live dev iteration — currently: shipping ``models.py`` / ``migrations/``
+        (plugins persist via owned DataStores, not their own DDL).
+
+        Raises ``PluginInstallError`` on a hard structural failure (bad path,
+        invalid slug, or a missing ``__init__.py`` / ``apps.py``).
+        """
+        folder = Path(local_path).expanduser().resolve()
+        if not folder.is_dir():
+            raise PluginInstallError(f"Dev plugin path is not a directory: {folder}")
+
+        slug = folder.name
+        if not is_valid_plugin_slug(slug):
+            raise PluginInstallError(
+                f"Invalid dev plugin slug '{slug}' (from the folder name). Use "
+                "lowercase letters, digits, underscores; must start with a letter."
+            )
+        if not (folder / "__init__.py").exists():
+            raise PluginInstallError(
+                f"Dev plugin '{slug}' is missing __init__.py (it must be a Python package)."
+            )
+        if not (folder / "apps.py").exists():
+            raise PluginInstallError(
+                f"Dev plugin '{slug}' is missing apps.py (it must define a PluginAppConfig)."
+            )
+
+        warnings = []
+        if (folder / "models.py").exists():
+            warnings.append(
+                "Plugin ships models.py — plugins persist via owned DataStores, "
+                "not their own models. The activation doctor will reject this."
+            )
+        if (folder / "migrations").is_dir():
+            warnings.append(
+                "Plugin ships a migrations/ package — plugins apply no DDL. "
+                "The activation doctor will reject this."
+            )
+        return slug, warnings
+
     # --------------------------------------------------------------- lifecycle
 
     @staticmethod
@@ -201,6 +256,22 @@ class PluginService:
         Returns (ok, output). On failure the plugin keeps its current installed
         state and the error is stored on the row — the live site is untouched.
         """
+        # Tier-1 doctor (static lint) runs FIRST, in this process, so a
+        # rule-breaker is refused BEFORE the preflight subprocess could apply any
+        # plugin migration. It only reads files + AST-parses (no plugin import),
+        # so it is safe here. The boot path never runs it (contract: an
+        # already-active plugin stays active across upgrade regardless of new rules).
+        from core.services.plugin_doctor import run_doctor
+
+        report = run_doctor(Path(settings.PLUGINS_DIR) / plugin.slug)
+        if not report.ok:
+            plugin.error_message = report.format()[:4000]
+            if plugin.status == Plugin.Status.ACTIVE:
+                plugin.status = Plugin.Status.ERRORED
+            plugin.save(update_fields=["status", "error_message", "updated_at"])
+            logger.warning("Plugin %r refused by doctor (%d fail)", plugin.slug, report.fail_count)
+            return False, "Plugin doctor blocked activation:\n" + report.failures_text()
+
         ok, output = PluginService._run_preflight(plugin.slug)
         if ok:
             plugin.status = Plugin.Status.ACTIVE
@@ -215,6 +286,9 @@ class PluginService:
                 plugin.status = Plugin.Status.ERRORED
             plugin.save(update_fields=["status", "error_message", "updated_at"])
             logger.warning("Plugin %r failed activation preflight", plugin.slug)
+        # On success, surface any advisory doctor warnings (non-blocking).
+        if ok and report.warn_count:
+            output = report.warnings_text()
         return ok, output
 
     @staticmethod
@@ -234,6 +308,18 @@ class PluginService:
         """
         warnings = []
         if remove_data:
+            # Plugin Platform v2: owned resources (owner_plugin=slug) are the
+            # plugin's real persistence — delete them. Best-effort + field-gated so
+            # it never errors on a pre-v2 schema. Owned Scripts cascade to their
+            # Runs/Schedules/SecretGrants; owned Secrets/DataStores cascade to
+            # their grants/entries. User (owner-NULL) rows are never touched.
+            removed = PluginService._cleanup_owned_resources(plugin.slug)
+            if removed:
+                logger.info("Plugin %r owned-data removed: %s", plugin.slug, removed)
+
+            # Legacy path: a v1 plugin that shipped its own models/migrations still
+            # gets its tables dropped in isolation. A v2 plugin ships none, so this
+            # is a no-op for it.
             ok, output = PluginService._run_uninstall_data(plugin.slug)
             if not ok:
                 warnings.append(
@@ -249,6 +335,45 @@ class PluginService:
         plugin.delete()
         logger.info("Plugin %r deleted (remove_data=%s)", slug, remove_data)
         return warnings
+
+    @staticmethod
+    def owned_resource_counts(slug: str) -> dict:
+        """Count Script/Secret/DataStore rows owned by ``slug`` (for the delete
+        preview). Field-gated + best-effort, so it's safe on a pre-v2 schema."""
+        from core.models import DataStore, Script, Secret
+
+        counts = {}
+        for model, label in ((Script, "scripts"), (Secret, "secrets"), (DataStore, "datastores")):
+            try:
+                model._meta.get_field("owner_plugin")
+                counts[label] = model.objects.filter(owner_plugin=slug).count()
+            except Exception:
+                counts[label] = 0
+        counts["total"] = sum(counts.values())
+        return counts
+
+    @staticmethod
+    def _cleanup_owned_resources(slug: str) -> dict:
+        """Delete Script/Secret/DataStore rows owned by ``slug``. Returns counts.
+
+        Field-gated (a pre-v2 schema has no ``owner_plugin`` column) and wrapped so
+        a cleanup failure can never block plugin removal — the files + registry row
+        are still removed by the caller.
+        """
+        from core.models import DataStore, Script, Secret
+
+        counts = {}
+        for model, label in ((Script, "scripts"), (Secret, "secrets"), (DataStore, "datastores")):
+            try:
+                model._meta.get_field("owner_plugin")  # raises if column absent
+                deleted, _ = model.objects.filter(owner_plugin=slug).delete()
+                if deleted:
+                    counts[label] = deleted
+            except Exception as exc:
+                logger.warning(
+                    "Owned-%s cleanup skipped for plugin %r: %s", label, slug, exc
+                )
+        return counts
 
     # ------------------------------------------------------------- restart info
 

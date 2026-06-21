@@ -1,0 +1,85 @@
+# PyRunner on Postgres.
+#
+# Same app image as docker-compose.yml — the ONLY difference is a managed
+# Postgres service plus DATABASE_URL pointing at it. SQLite remains the
+# zero-config default (use docker-compose.yml for that); this template is the
+# opt-in "run on Postgres" deployment.
+#
+# Note: the /app/data volume is still required even on Postgres — environments
+# (venvs), the scripts workdir, and the Claude config dir live on disk, not in
+# the database. Postgres replaces only the relational data.
+#
+#   docker compose -f docker-compose.postgres.yml up -d
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: pyrunner-db
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-pyrunner}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-pyrunner}
+      - POSTGRES_DB=${POSTGRES_DB:-pyrunner}
+    volumes:
+      - pyrunner_pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-pyrunner} -d ${POSTGRES_DB:-pyrunner}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  pyrunner:
+    build: .
+    container_name: pyrunner
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "${PORT:-8000}:8000"
+    volumes:
+      # Still required on Postgres: venvs, workdir, Claude config dir (on disk).
+      - pyrunner_data:/app/data
+      - pyrunner_plugins:/app/plugins
+    environment:
+      # Required - container will fail to start if not set.
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY:-}
+      - SECRET_KEY=${SECRET_KEY:-}
+      - DEBUG=${DEBUG:-False}
+      - SECURE_SSL_REDIRECT=${SECURE_SSL_REDIRECT:-False}
+      # Secure cookies require HTTPS. Default True (prod / edge-TLS); set False
+      # for a plain-http run or the session cookie won't come back (logout loop).
+      - SESSION_COOKIE_SECURE=${SESSION_COOKIE_SECURE:-True}
+      - CSRF_COOKIE_SECURE=${CSRF_COOKIE_SECURE:-True}
+      - ALLOWED_HOSTS=${ALLOWED_HOSTS:-localhost,127.0.0.1}
+
+      # The engine switch: point PyRunner at the managed Postgres service.
+      - DATABASE_URL=postgres://${POSTGRES_USER:-pyrunner}:${POSTGRES_PASSWORD:-pyrunner}@db:5432/${POSTGRES_DB:-pyrunner}
+
+      # Email settings (optional)
+      - EMAIL_BACKEND=${EMAIL_BACKEND:-django.core.mail.backends.console.EmailBackend}
+      - DEFAULT_FROM_EMAIL=${DEFAULT_FROM_EMAIL:-noreply@pyrunner.local}
+      - RESEND_API_KEY=${RESEND_API_KEY:-}
+      - USE_RESEND=${USE_RESEND:-False}
+
+      # Worker / gunicorn settings
+      - Q_WORKERS=${Q_WORKERS:-2}
+      - PORT=8000
+      - GUNICORN_WORKERS=${GUNICORN_WORKERS:-2}
+      - GUNICORN_THREADS=${GUNICORN_THREADS:-4}
+      - GUNICORN_TIMEOUT=${GUNICORN_TIMEOUT:-120}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+volumes:
+  pyrunner_data:
+    driver: local
+  pyrunner_plugins:
+    driver: local
+  pyrunner_pgdata:
+    driver: local

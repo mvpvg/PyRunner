@@ -157,9 +157,11 @@ def execute_scheduled_run(script_id: str) -> dict:
         logger.error(f"No schedule found for script {script.name}")
         return {"success": False, "error": "No schedule"}
 
-    # Create the run
+    # Create the run. A scheduled run fires with no request/user — its workspace
+    # comes from the script (tenancy Stage 1), the only authoritative source.
     run = Run.objects.create(
         script=script,
+        workspace_id=script.workspace_id,
         status=Run.Status.PENDING,
         triggered_by=None,  # System-triggered
         trigger_type=Run.TriggerType.SCHEDULED,
