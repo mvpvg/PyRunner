@@ -41,18 +41,26 @@ def resolve_secrets_for_run(run) -> dict:
 
     Workspace scoping (transitional until the Stage 3 creation-sweep, chosen to
     keep a single-workspace instance byte-for-byte):
-    - ``run`` is None or ``run.workspace_id`` is None ⇒ ALL secrets (today's
-      behavior; an un-scoped run cannot narrow).
+    - ``run`` is None or ``run.workspace_id`` is None ⇒ no workspace narrowing
+      (today's behavior; an un-scoped run cannot narrow).
     - otherwise ⇒ the run's-workspace secrets PLUS still-unassigned
       (``workspace IS NULL``) secrets — because secret *creation* is not yet
       workspace-scoped, so a freshly-created (NULL) secret must keep injecting on
       a single-workspace instance.
 
-    Phase B (plugin platform) layers owner_plugin / per-script grant rules INSIDE
-    this same function; workspace scoping composes with them here, never forks.
+    Owner / injection-mode scoping (Plugin Platform v2, WS3) layered INSIDE the
+    same workspace scope so the two never fork:
+    - ``injection_mode='all'`` (the default, and for any run without a script)
+      ⇒ every USER (``owner_plugin IS NULL``) secret in scope. This is the literal
+      pre-v2 path: on an existing instance every row is owner-NULL, so the set is
+      byte-identical; plugin-owned secrets never leak into a non-owned script.
+    - ``injection_mode='selected'`` (opt-in; set by the SDK for plugin scripts)
+      ⇒ explicitly-global (owner-NULL) + same-owner + actively-granted secrets,
+      each injected under its CLEAN name. Precedence on a clean-name clash:
+      global < same-owner < explicit grant (the most specific wins).
 
     Returns:
-        Dict of {key: decrypted_value}.
+        Dict of {clean_name: decrypted_value}.
     """
     secrets_env = {}
 
@@ -62,15 +70,40 @@ def resolve_secrets_for_run(run) -> dict:
         return secrets_env
 
     try:
-        queryset = Secret.objects.all()
         ws_id = getattr(run, "workspace_id", None) if run is not None else None
-        if ws_id is not None:
-            queryset = queryset.filter(
-                Q(workspace_id=ws_id) | Q(workspace__isnull=True)
+
+        def _ws_scope(qs):
+            if ws_id is not None:
+                return qs.filter(Q(workspace_id=ws_id) | Q(workspace__isnull=True))
+            return qs
+
+        mode = "all"
+        owner = None
+        if run is not None and getattr(run, "script_id", None):
+            mode = getattr(run.script, "injection_mode", "all") or "all"
+            owner = getattr(run.script, "owner_plugin", None)
+
+        if mode == "selected":
+            # Build by precedence so an owner's own / granted secret wins a
+            # clean-name clash with a global one.
+            chosen = {}  # clean_name -> Secret
+            for s in _ws_scope(Secret.objects.filter(owner_plugin__isnull=True)):
+                chosen[s.get_clean_name()] = s
+            if owner:
+                for s in _ws_scope(Secret.objects.filter(owner_plugin=owner)):
+                    chosen[s.get_clean_name()] = s
+            granted = Secret.objects.filter(
+                grants__script_id=run.script_id, grants__active=True
             )
-        for secret in queryset:
+            for s in _ws_scope(granted):
+                chosen[s.get_clean_name()] = s
+            resolved = list(chosen.values())
+        else:
+            resolved = _ws_scope(Secret.objects.filter(owner_plugin__isnull=True))
+
+        for secret in resolved:
             try:
-                secrets_env[secret.key] = secret.get_decrypted_value()
+                secrets_env[secret.get_clean_name()] = secret.get_decrypted_value()
             except Exception as e:
                 logger.error(f"Failed to decrypt secret {secret.key}: {e}")
     except Exception as e:
@@ -168,6 +201,12 @@ def _build_script_environment(
             ws_id = default_ws.id if default_ws else None
         if ws_id is not None:
             env["PYRUNNER_WORKSPACE_ID"] = ws_id.hex
+
+        # Expose the owning plugin slug to its own worker script (Plugin Platform
+        # v2), e.g. so it can address its auto-named DataStore by the short key.
+        # Absent for user-created scripts (owner_plugin NULL).
+        if run.script_id and getattr(run.script, "owner_plugin", None):
+            env["PYRUNNER_OWNER_PLUGIN"] = run.script.owner_plugin
 
     # Add script_helpers to PYTHONPATH so scripts can import pyrunner_datastore
     helpers_path = str(Path(settings.BASE_DIR) / "core" / "script_helpers")

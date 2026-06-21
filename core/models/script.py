@@ -36,6 +36,52 @@ class Script(models.Model):
 
     objects = WorkspaceScopedManager()
 
+    # Plugin ownership (Plugin Platform v2, WS3). Nullable: NULL = a normal
+    # user-created script = today's semantics. ``owner_plugin`` is a slug STRING
+    # (not an FK, survives plugin deletion); ``owner_key`` is the SDK's stable
+    # handle for idempotent upsert on (owner_plugin, owner_key).
+    owner_plugin = models.CharField(
+        max_length=100,
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="Slug of the plugin that owns this script (NULL = user-created).",
+    )
+    owner_key = models.CharField(
+        max_length=100,
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="Stable per-owner handle for idempotent upsert (NULL = unmanaged).",
+    )
+
+    # Secret injection mode (Plugin Platform v2, WS3). 'all' is the default and
+    # the literal pre-v2 behavior: inject every user (owner-NULL) secret in the
+    # workspace. 'selected' is opt-in (set by the SDK for plugin-owned scripts):
+    # inject only granted + same-owner + explicitly-global secrets. NOTE: this is
+    # SECRET scoping, NOT the sandbox ``isolation_mode`` field above.
+    class InjectionMode(models.TextChoices):
+        ALL = "all", "All secrets (default)"
+        SELECTED = "selected", "Selected secrets only"
+
+    injection_mode = models.CharField(
+        max_length=20,
+        choices=InjectionMode.choices,
+        default=InjectionMode.ALL,
+        help_text="Which secrets to inject. 'all' = every workspace secret "
+        "(today's behavior); 'selected' = only granted/same-owner/global secrets.",
+    )
+
+    # Opt-in per-script secret grants (consulted only when injection_mode='selected').
+    granted_secrets = models.ManyToManyField(
+        "core.Secret",
+        through="core.SecretGrant",
+        through_fields=("script", "secret"),
+        related_name="granted_to_scripts",
+        blank=True,
+        help_text="Secrets explicitly attached to this script (selected mode).",
+    )
+
     # The actual Python code
     code = models.TextField(help_text="Python code to execute")
 

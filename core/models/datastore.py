@@ -41,6 +41,27 @@ class DataStore(models.Model):
 
     objects = WorkspaceScopedManager()
 
+    # Plugin ownership (Plugin Platform v2, WS3). Nullable: NULL = a normal
+    # user/system store. These are GROUPING/cleanup metadata only — they are
+    # NEVER part of the uniqueness key (the by-name helper + REST API depend on
+    # ``name`` resolving to exactly one row per workspace). The SDK avoids
+    # cross-plugin collisions by AUTO-NAMING the store ``"<owner_plugin>:<owner_key>"``,
+    # keeping ``name`` unique while the plugin refers to it by its short key.
+    owner_plugin = models.CharField(
+        max_length=100,
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="Slug of the plugin that owns this data store (NULL = user/system).",
+    )
+    owner_key = models.CharField(
+        max_length=100,
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="Stable per-owner handle for idempotent upsert (NULL = unmanaged).",
+    )
+
     description = models.TextField(
         blank=True,
         help_text="Optional description of what this data store is used for",

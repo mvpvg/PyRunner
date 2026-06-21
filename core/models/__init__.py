@@ -13,7 +13,7 @@ from .run import Run
 from .schedule import ScriptSchedule, ScheduleHistory
 from .settings import GlobalSettings
 from .package import PackageOperation
-from .secret import Secret
+from .secret import Secret, SecretGrant
 from .tag import Tag
 from .datastore import DataStore, DataStoreEntry
 from .api_token import DataStoreAPIToken
@@ -35,6 +35,7 @@ __all__ = [
     "GlobalSettings",
     "PackageOperation",
     "Secret",
+    "SecretGrant",
     "Tag",
     "DataStore",
     "DataStoreEntry",
