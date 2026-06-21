@@ -258,6 +258,75 @@ else:
             PLUGIN_LOAD_ERRORS[_slug] = _err
 
 
+# --- Plugin Dev Mode (Plugin Platform v2, WS1) ------------------------------
+# Load ONE plugin straight from a local folder under `manage.py runserver`, with
+# Django's StatReloader giving live .py/template reload — no zip, no upload, no
+# preflight, no restart. This is purely a developer convenience and is gated so
+# it can NEVER run in production.
+#
+# Triple guard (all three required):
+#   DEBUG                       — never in a production (DEBUG=False) process.
+#   PYRUNNER_PLUGIN_DEV (path)  — the dev folder; unset by default.
+#   RUN_MAIN                    — set only in the runserver reloader CHILD, so
+#                                 the plugin registers exactly once (the parent
+#                                 watcher process must not also load it, which
+#                                 would double-register / fight for the DB).
+# The gunicorn/WSGI path never sets RUN_MAIN, so this block is inert there even
+# if DEBUG and the var were somehow both set.
+#
+# Mechanism: the dev folder is named for the slug and lives anywhere on disk. We
+# splice its PARENT onto the `plugins` package __path__, so `plugins.<slug>`
+# resolves to it — meaning the plugin's apps.py/urls.py (name="plugins.<slug>",
+# app_name="<slug>") are byte-identical to the eventual shipped form. The
+# existing per-plugin URL mount loop in pyrunner/urls.py then picks it up from
+# INSTALLED_PLUGINS with no special-casing.
+#
+# Kept deliberately self-contained (imports nothing from `core`, mirroring the
+# loader above): a failure here is recorded and swallowed, never fatal to boot.
+DEV_PLUGIN = None  # full app path ("plugins.<slug>") of the dev plugin, if loaded
+_dev_plugin_path = os.environ.get("PYRUNNER_PLUGIN_DEV", "").strip()
+if DEBUG and _dev_plugin_path and os.environ.get("RUN_MAIN"):
+    try:
+        _dev_dir = Path(_dev_plugin_path).expanduser().resolve()
+        _dev_slug = _dev_dir.name
+        if not _dev_dir.is_dir():
+            raise FileNotFoundError(f"dev plugin path is not a directory: {_dev_dir}")
+        if not _plugin_slug_ok(_dev_slug):
+            raise ValueError(
+                f"dev plugin folder name {_dev_slug!r} is not a valid slug "
+                "(lowercase letter, then letters/digits/underscores)"
+            )
+        if not (_dev_dir / "apps.py").exists():
+            raise FileNotFoundError(f"dev plugin {_dev_dir} is missing apps.py")
+
+        # Splice the dev folder's parent into the plugins package search path so
+        # `import plugins.<slug>` resolves to it. Importing the (trivial) plugins
+        # package is safe — it is not a core import.
+        import plugins as _plugins_pkg
+
+        _dev_parent = str(_dev_dir.parent)
+        if _dev_parent not in _plugins_pkg.__path__:
+            _plugins_pkg.__path__.append(_dev_parent)
+
+        _dev_app = f"plugins.{_dev_slug}"
+        if _dev_app in INSTALLED_PLUGINS:
+            # An installed+active plugin of the same slug is already loaded from
+            # PLUGINS_DIR (which is searched first); don't shadow it.
+            PLUGIN_LOAD_ERRORS[_dev_slug] = (
+                "dev plugin not loaded: a plugin with this slug is already active"
+            )
+        else:
+            _ok, _err = _light_import_ok(_dev_slug)
+            if _ok:
+                INSTALLED_APPS.append(_dev_app)
+                INSTALLED_PLUGINS.append(_dev_app)
+                DEV_PLUGIN = _dev_app
+            else:
+                PLUGIN_LOAD_ERRORS[_dev_slug] = _err
+    except Exception as _dev_exc:  # never let a dev misconfig stop the server
+        PLUGIN_LOAD_ERRORS[_dev_plugin_path or "?"] = repr(_dev_exc)
+
+
 # Custom User Model
 AUTH_USER_MODEL = "core.User"
 

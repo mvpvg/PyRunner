@@ -192,6 +192,61 @@ class PluginService:
                 h.update(path.read_bytes())
         return h.hexdigest()
 
+    # ----------------------------------------------------------------- dev mode
+
+    @staticmethod
+    def validate_dev_mode_plugin(local_path) -> tuple[str, list]:
+        """Validate a local plugin folder for Dev Mode (Plugin Platform v2, WS1).
+
+        Mirrors the structural checks the ``settings.py`` dev-load block performs,
+        but as an importable, testable helper for tests and the future
+        ``plugin_doctor --path``. It NEVER imports/executes the plugin code,
+        touches disk, or applies migrations — it only inspects the folder layout.
+
+        The folder name is the slug; the plugin is loaded under runserver as
+        ``plugins.<slug>`` (its ``apps.py`` declares ``name="plugins.<slug>"``),
+        so the dev form is byte-identical to the eventual shipped form.
+
+        Returns ``(slug, warnings)``. ``warnings`` flags v2 rule violations that
+        the activation doctor (Stage 4) will later enforce but that do not block
+        live dev iteration — currently: shipping ``models.py`` / ``migrations/``
+        (plugins persist via owned DataStores, not their own DDL).
+
+        Raises ``PluginInstallError`` on a hard structural failure (bad path,
+        invalid slug, or a missing ``__init__.py`` / ``apps.py``).
+        """
+        folder = Path(local_path).expanduser().resolve()
+        if not folder.is_dir():
+            raise PluginInstallError(f"Dev plugin path is not a directory: {folder}")
+
+        slug = folder.name
+        if not is_valid_plugin_slug(slug):
+            raise PluginInstallError(
+                f"Invalid dev plugin slug '{slug}' (from the folder name). Use "
+                "lowercase letters, digits, underscores; must start with a letter."
+            )
+        if not (folder / "__init__.py").exists():
+            raise PluginInstallError(
+                f"Dev plugin '{slug}' is missing __init__.py (it must be a Python package)."
+            )
+        if not (folder / "apps.py").exists():
+            raise PluginInstallError(
+                f"Dev plugin '{slug}' is missing apps.py (it must define a PluginAppConfig)."
+            )
+
+        warnings = []
+        if (folder / "models.py").exists():
+            warnings.append(
+                "Plugin ships models.py — plugins persist via owned DataStores, "
+                "not their own models. The activation doctor will reject this."
+            )
+        if (folder / "migrations").is_dir():
+            warnings.append(
+                "Plugin ships a migrations/ package — plugins apply no DDL. "
+                "The activation doctor will reject this."
+            )
+        return slug, warnings
+
     # --------------------------------------------------------------- lifecycle
 
     @staticmethod
