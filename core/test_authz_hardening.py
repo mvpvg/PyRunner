@@ -7,6 +7,7 @@ instance-global admin surfaces. The shared ``@superuser_required`` decorator
 sends non-superusers to the login page (302 redirect), so a denied request is a
 redirect to ``auth:login`` that performs no mutation.
 """
+import uuid
 from unittest import mock
 
 from django.test import TestCase
@@ -83,3 +84,57 @@ class SettingsAuthzTests(TestCase):
         resp = self.client.post(reverse("cpanel:notification_settings"), {})
         self.assertEqual(resp.status_code, 302)
         self.assertEqual(resp["Location"], reverse("cpanel:settings"))
+
+
+class EnvironmentAuthzTests(TestCase):
+    """Vuln 5 — environment + package management is superuser-only.
+
+    These endpoints create/delete shared cross-workspace environments and run
+    `pip` on the host (unsandboxed), so a member reaching them means both host
+    code-exec (via a package build step) and cross-tenant infra mutation.
+    """
+
+    def setUp(self):
+        _mock_setup(self)
+        self.member = User.objects.create(email="member@example.com")  # non-superuser
+        self.superuser = User.objects.create(email="root@example.com", is_superuser=True)
+        self.login_path = reverse("auth:login")
+        # A well-formed but non-existent pk: the superuser gate fires before the
+        # object lookup, so a denied member gets 302→login, never a 404.
+        self._pk = uuid.uuid4()
+
+    def _gated_urls(self):
+        pk = self._pk
+        return [
+            reverse("cpanel:environment_create"),
+            reverse("cpanel:environment_edit", args=[pk]),
+            reverse("cpanel:environment_delete", args=[pk]),
+            reverse("cpanel:environment_set_default", args=[pk]),
+            reverse("cpanel:package_install", args=[pk]),
+            reverse("cpanel:package_uninstall", args=[pk]),
+            reverse("cpanel:bulk_install", args=[pk]),
+        ]
+
+    def test_member_denied_on_every_env_endpoint(self):
+        self.client.force_login(self.member)
+        for url in self._gated_urls():
+            with self.subTest(url=url):
+                resp = self.client.post(url, {})
+                self.assertEqual(resp.status_code, 302)
+                self.assertTrue(
+                    resp["Location"].startswith(self.login_path),
+                    f"{url} did not redirect a member to login: {resp['Location']}",
+                )
+
+    def test_member_cannot_reach_create_form(self):
+        """Even the create page (GET) is admin-only."""
+        self.client.force_login(self.member)
+        resp = self.client.get(reverse("cpanel:environment_create"))
+        self.assertEqual(resp.status_code, 302)
+        self.assertTrue(resp["Location"].startswith(self.login_path))
+
+    def test_superuser_reaches_create_form(self):
+        """The gate doesn't break admins: a superuser reaches the create form."""
+        self.client.force_login(self.superuser)
+        resp = self.client.get(reverse("cpanel:environment_create"))
+        self.assertEqual(resp.status_code, 200)

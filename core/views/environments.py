@@ -2,7 +2,7 @@
 Environment views for the control panel.
 """
 from django.shortcuts import render, get_object_or_404, redirect
-from django.contrib.auth.decorators import login_required
+from django.contrib.auth.decorators import login_required, user_passes_test
 from django.contrib import messages
 from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.views.decorators.http import require_POST
@@ -16,6 +16,18 @@ from core.forms import (
     BulkInstallForm,
 )
 from core.services import EnvironmentService
+
+
+def superuser_required(view_func):
+    """Decorator to require superuser status.
+
+    Environments are shared, cross-workspace host infrastructure and package
+    installs run `pip` on the host (unsandboxed), so create/edit/delete and
+    package management are admin-only — matching the other infra surfaces
+    (settings.py, backup.py, plugins.py). The read-only list/detail/packages
+    views stay member-visible.
+    """
+    return user_passes_test(lambda u: u.is_superuser, login_url="auth:login")(view_func)
 
 
 def _sanitize_filename(name: str) -> str:
@@ -73,6 +85,7 @@ def environment_detail_view(request: HttpRequest, pk) -> HttpResponse:
 
 
 @login_required
+@superuser_required
 def environment_create_view(request: HttpRequest) -> HttpResponse:
     """Create a new environment."""
     if request.method == "POST":
@@ -122,6 +135,7 @@ def environment_create_view(request: HttpRequest) -> HttpResponse:
 
 
 @login_required
+@superuser_required
 def environment_edit_view(request: HttpRequest, pk) -> HttpResponse:
     """Edit environment details (name/description only)."""
     environment = get_object_or_404(Environment, pk=pk)
@@ -148,6 +162,7 @@ def environment_edit_view(request: HttpRequest, pk) -> HttpResponse:
 
 
 @login_required
+@superuser_required
 @require_POST
 def environment_delete_view(request: HttpRequest, pk) -> HttpResponse:
     """Delete an environment."""
@@ -177,6 +192,7 @@ def environment_delete_view(request: HttpRequest, pk) -> HttpResponse:
 
 
 @login_required
+@superuser_required
 @require_POST
 def environment_set_default_view(request: HttpRequest, pk) -> HttpResponse:
     """Set an environment as the default."""
@@ -242,6 +258,7 @@ def environment_packages_view(request: HttpRequest, pk) -> HttpResponse:
 
 
 @login_required
+@superuser_required
 @require_POST
 def package_install_view(request: HttpRequest, pk) -> HttpResponse:
     """Install a package (async via django-q2)."""
@@ -278,6 +295,7 @@ def package_install_view(request: HttpRequest, pk) -> HttpResponse:
 
 
 @login_required
+@superuser_required
 @require_POST
 def package_uninstall_view(request: HttpRequest, pk) -> HttpResponse:
     """Uninstall a package (async via django-q2)."""
@@ -315,6 +333,7 @@ def package_uninstall_view(request: HttpRequest, pk) -> HttpResponse:
 
 
 @login_required
+@superuser_required
 @require_POST
 def bulk_install_view(request: HttpRequest, pk) -> HttpResponse:
     """Bulk install packages from requirements."""
