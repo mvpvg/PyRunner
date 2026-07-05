@@ -615,8 +615,16 @@ class BulkInstallForm(forms.Form):
         for line in requirements_text.splitlines():
             line = line.strip()
             # Skip empty lines and comments
-            if not line or line.startswith("#") or line.startswith("-"):
+            if not line or line.startswith("#"):
                 continue
+            # Reject pip option lines (leading "-", e.g. --index-url /
+            # --extra-index-url): pip honours them inside a requirements file,
+            # so they can redirect installs to an attacker-controlled index
+            # (Vuln 6). Only comments and package specs are allowed.
+            if line.startswith("-"):
+                raise forms.ValidationError(
+                    f"Option lines (e.g. --index-url) are not allowed: {line}"
+                )
             # Extract package spec (first word before any whitespace)
             pkg_spec = line.split()[0] if line.split() else ""
             if pkg_spec and not EnvironmentService.validate_package_spec(pkg_spec):

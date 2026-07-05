@@ -484,14 +484,21 @@ class EnvironmentService:
         if not os.path.isfile(pip_path):
             return False, "", f"pip not found at {pip_path}"
 
-        # Validate each line
+        # Validate each line. Reject pip option lines (leading "-", e.g.
+        # --index-url / --extra-index-url): pip honours them inside a
+        # requirements file, so a skipped option line would let the body
+        # redirect installs to an attacker-controlled index (Vuln 6). Only
+        # comments and package specs are allowed.
         for line in requirements.splitlines():
             line = line.strip()
-            if line and not line.startswith("#") and not line.startswith("-"):
-                # Extract package name (before any version specifier)
-                pkg_spec = line.split()[0] if line.split() else ""
-                if pkg_spec and not cls.validate_package_spec(pkg_spec):
-                    return False, "", f"Invalid package specification: {line}"
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("-"):
+                return False, "", f"Option lines are not allowed in requirements: {line}"
+            # Extract package name (before any version specifier)
+            pkg_spec = line.split()[0] if line.split() else ""
+            if pkg_spec and not cls.validate_package_spec(pkg_spec):
+                return False, "", f"Invalid package specification: {line}"
 
         # Write requirements to temp file
         try:
