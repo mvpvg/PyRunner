@@ -1,5 +1,6 @@
 """
-Authentication views supporting both password and magic link login.
+Authentication views. Password-based login plus email-based password reset;
+invite onboarding uses a set-password flow (no passwordless login surface).
 """
 import logging
 
@@ -10,12 +11,10 @@ from django.contrib import messages
 from django.views.decorators.http import require_http_methods, require_POST
 from django.views.decorators.csrf import csrf_protect
 from django.http import HttpRequest, HttpResponse
-from django.urls import reverse
-from django.utils import timezone
 
-from core.models import MagicToken, User, UserInvite, PasswordResetToken
+from core.models import User, UserInvite, PasswordResetToken
 from core.models.settings import GlobalSettings
-from core.email import send_magic_link_email, send_password_reset_email
+from core.email import send_password_reset_email
 from core.forms import PasswordLoginForm, SetPasswordForm
 from core.services import RecaptchaService, EncryptionService, EncryptionError
 
@@ -26,9 +25,9 @@ logger = logging.getLogger(__name__)
 @require_http_methods(["GET", "POST"])
 def login_view(request: HttpRequest) -> HttpResponse:
     """
-    Display login form and handle both password and magic link authentication.
-    GET: Show login form with password (primary) and magic link (secondary) options
-    POST: Handle password auth or magic link request based on form submission
+    Display the login form and handle password authentication.
+    GET: Show the password login form.
+    POST: Authenticate the submitted credentials.
     """
     if request.user.is_authenticated:
         return redirect("cpanel:dashboard")
@@ -64,17 +63,13 @@ def login_view(request: HttpRequest) -> HttpResponse:
                         user_obj = User.objects.get(email=email)
                         if not user_obj.has_usable_password():
                             if email_enabled:
-                                error_message = "This account doesn't have a password set. Use the magic link option below."
+                                error_message = "This account doesn't have a password set. Use \"Forgot your password?\" to set one."
                             else:
                                 error_message = "This account doesn't have a password set. Please contact an administrator."
                         else:
                             error_message = "Invalid email or password."
                     except User.DoesNotExist:
                         error_message = "Invalid email or password."
-
-        elif action == "magic_link":
-            # Magic link flow
-            return _handle_magic_link_request(request)
 
     return render(request, "auth/login.html", {
         "password_form": password_form,
@@ -96,116 +91,6 @@ def _verify_recaptcha(request: HttpRequest, settings: GlobalSettings) -> bool:
     return RecaptchaService.verify(secret, token, get_client_ip(request))
 
 
-def _handle_magic_link_request(request: HttpRequest) -> HttpResponse:
-    """Handle magic link login request."""
-    email = request.POST.get("magic_email", "").strip().lower()
-
-    if not email:
-        messages.error(request, "Please enter your email address.")
-        return redirect("auth:login")
-
-    if "@" not in email or "." not in email:
-        messages.error(request, "Please enter a valid email address.")
-        return redirect("auth:login")
-
-    # Check if user exists or if this is the first user
-    user_exists = User.objects.filter(email=email).exists()
-    is_first_user = User.objects.count() == 0
-
-    # Registration is invite-only, enforced in code (not a runtime toggle). The
-    # first user bootstraps the admin account; everyone else needs a valid invite.
-    if not user_exists and not is_first_user:
-        has_valid_invite = UserInvite.objects.filter(
-            email=email,
-            used_at__isnull=True,
-            expires_at__gt=timezone.now()
-        ).exists()
-
-        if not has_valid_invite:
-            messages.error(
-                request,
-                "Registration is invite-only. Please contact an administrator."
-            )
-            return redirect("auth:login")
-
-    ip_address = get_client_ip(request)
-    token = MagicToken.create_for_email(email, ip_address)
-
-    # Check if we should show magic link directly (email disabled)
-    settings = GlobalSettings.get_settings()
-    show_magic_link = settings.email_backend == GlobalSettings.EmailBackend.DISABLED
-
-    if not show_magic_link:
-        send_magic_link_email(request, token)
-
-    # Store in session for magic_link_sent_view
-    request.session["magic_token_id"] = str(token.id)
-    request.session["show_magic_link"] = show_magic_link
-
-    return redirect("auth:magic_link_sent")
-
-
-def magic_link_sent_view(request: HttpRequest) -> HttpResponse:
-    """
-    Confirmation page shown after magic link is sent.
-    Shows the magic link directly if email is disabled.
-    """
-    context = {}
-
-    show_magic_link = request.session.pop("show_magic_link", False)
-    magic_token_id = request.session.pop("magic_token_id", None)
-
-    if show_magic_link and magic_token_id:
-        try:
-            token = MagicToken.objects.get(id=magic_token_id)
-            if token.is_valid():
-                verify_url = reverse("auth:verify", kwargs={"token": token.token})
-                context["magic_link_url"] = request.build_absolute_uri(verify_url)
-                context["show_magic_link"] = True
-        except MagicToken.DoesNotExist:
-            pass
-
-    return render(request, "auth/magic_link_sent.html", context)
-
-
-@require_http_methods(["GET"])
-def verify_view(request: HttpRequest, token: str) -> HttpResponse:
-    """
-    Verify magic link token and log user in.
-    """
-    try:
-        magic_token = MagicToken.objects.get(token=token)
-    except MagicToken.DoesNotExist:
-        return render(request, "auth/verify.html", {
-            "error": "Invalid link",
-            "message": "This magic link is invalid. Please request a new one."
-        })
-
-    if not magic_token.is_valid():
-        if magic_token.used_at:
-            error_message = "This magic link has already been used."
-        else:
-            error_message = "This magic link has expired. Please request a new one."
-
-        return render(request, "auth/verify.html", {
-            "error": "Link expired",
-            "message": error_message
-        })
-
-    try:
-        user = magic_token.consume()
-    except ValueError as e:
-        return render(request, "auth/verify.html", {
-            "error": "Verification failed",
-            "message": str(e)
-        })
-
-    login(request, user, backend='django.contrib.auth.backends.ModelBackend')
-    messages.success(request, f"Welcome back, {user.email}!")
-
-    return redirect("cpanel:dashboard")
-
-
 @require_POST
 @csrf_protect
 def logout_view(request: HttpRequest) -> HttpResponse:
@@ -217,10 +102,13 @@ def logout_view(request: HttpRequest) -> HttpResponse:
     return redirect("auth:login")
 
 
-@require_http_methods(["GET"])
+@csrf_protect
+@require_http_methods(["GET", "POST"])
 def accept_invite_view(request: HttpRequest, token: str) -> HttpResponse:
     """
-    Handle invite link - validates invite and creates magic token for the invited email.
+    Handle an invite link: validate the invite, then let the invited user set a
+    password. The account is created (with a usable password) only when the form
+    is submitted, so no passwordless login surface is ever created.
     """
     try:
         invite = UserInvite.objects.get(token=token)
@@ -241,25 +129,32 @@ def accept_invite_view(request: HttpRequest, token: str) -> HttpResponse:
             "message": error_message
         })
 
-    # Create magic token for this email
-    ip_address = get_client_ip(request)
-    magic_token = MagicToken.create_for_email(invite.email, ip_address)
+    if request.method == "POST":
+        form = SetPasswordForm(request.POST)
+        if form.is_valid():
+            # Create/activate the invited account WITH a password. get_or_create
+            # keeps the post-save membership signal in play (invitee -> member).
+            user, _ = User.objects.get_or_create(
+                email=invite.email,
+                defaults={"is_verified": True},
+            )
+            user.is_verified = True
+            user.set_password(form.cleaned_data["password"])
+            user.save()
 
-    # Mark invite as used
-    invite.mark_used(magic_token.user)
+            invite.mark_used(user)
 
-    # Check if we should show magic link directly (email disabled)
-    settings = GlobalSettings.get_settings()
-    show_magic_link = settings.email_backend == GlobalSettings.EmailBackend.DISABLED
+            login(request, user, backend="django.contrib.auth.backends.ModelBackend")
+            messages.success(request, f"Welcome to PyRunner, {user.email}!")
+            return redirect("cpanel:dashboard")
+    else:
+        form = SetPasswordForm()
 
-    if not show_magic_link:
-        send_magic_link_email(request, magic_token)
-
-    # Store in session for magic_link_sent_view
-    request.session["magic_token_id"] = str(magic_token.id)
-    request.session["show_magic_link"] = show_magic_link
-
-    return redirect("auth:magic_link_sent")
+    return render(request, "auth/accept_invite.html", {
+        "form": form,
+        "email": invite.email,
+        "token": token,
+    })
 
 
 # =============================================================================

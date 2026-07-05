@@ -28,7 +28,7 @@ services:
       - ALLOWED_HOSTS=${ALLOWED_HOSTS:-localhost,127.0.0.1}
 
       # Email — defaults to console. Configure SMTP/Resend in the app
-      # (Settings -> Email) after first login so magic-link auth works.
+      # (Settings -> Email) after first login so password-reset emails work.
       - EMAIL_BACKEND=${EMAIL_BACKEND:-django.core.mail.backends.console.EmailBackend}
       - DEFAULT_FROM_EMAIL=${DEFAULT_FROM_EMAIL:-noreply@pyrunner.local}
       - RESEND_API_KEY=${RESEND_API_KEY:-}

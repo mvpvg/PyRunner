@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+
+{% block title %}Set Your Password - PyRunner{% endblock %}
+
+{% block header %}{% endblock %}
+{% block footer %}{% endblock %}
+
+{% block content %}
+<div class="min-h-screen flex items-center justify-center px-4 py-12">
+    <div class="w-full max-w-md">
+        <div class="text-center mb-10">
+            <div class="w-16 h-16 bg-ok/10 rounded-2xl grid place-items-center mx-auto mb-6 glow-accent">
+                <svg class="w-8 h-8 text-ok" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/></svg>
+            </div>
+            <h1 class="text-2xl font-semibold tracking-tight text-text mb-2">Set your password</h1>
+            <p class="text-muted">Create a password for <span class="text-text font-medium">{{ email }}</span> to finish setting up your account.</p>
+        </div>
+
+        <div class="bg-panel border border-line rounded-2xl p-8">
+            {% if form.errors %}
+                <div class="mb-6 p-4 bg-fail/10 border border-fail/30 rounded-lg">
+                    {% for error in form.non_field_errors %}<p class="text-sm text-fail">{{ error }}</p>{% endfor %}
+                </div>
+            {% endif %}
+
+            <form method="post" class="space-y-5">
+                {% csrf_token %}
+                <div>
+                    <label for="id_password" class="block text-[13px] font-medium text-muted mb-1.5">Password</label>
+                    {{ form.password }}
+                    {% if form.password.help_text %}<p class="mt-1.5 text-xs text-faint">{{ form.password.help_text }}</p>{% endif %}
+                    {% if form.password.errors %}<p class="mt-1.5 text-xs text-fail">{{ form.password.errors.0 }}</p>{% endif %}
+                </div>
+                <div>
+                    <label for="id_password_confirm" class="block text-[13px] font-medium text-muted mb-1.5">Confirm password</label>
+                    {{ form.password_confirm }}
+                    {% if form.password_confirm.errors %}<p class="mt-1.5 text-xs text-fail">{{ form.password_confirm.errors.0 }}</p>{% endif %}
+                </div>
+                <button type="submit" class="w-full py-3 px-4 bg-ok text-ink font-semibold rounded-lg hover:opacity-90 transition">Create account</button>
+            </form>
+        </div>
+    </div>
+</div>
+{% endblock %}

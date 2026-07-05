@@ -1,5 +1,5 @@
 """
-Email sending abstraction for magic link authentication.
+Email sending abstraction for authentication emails (password reset).
 Supports multiple backends: Console (dev), Resend API (production).
 """
 import logging
@@ -8,81 +8,6 @@ from django.core.mail import EmailMultiAlternatives, send_mail
 from django.urls import reverse
 
 logger = logging.getLogger(__name__)
-
-
-def send_magic_link_email(request, magic_token) -> bool:
-    """
-    Send magic link email using configured backend.
-
-    Args:
-        request: HttpRequest object (for building absolute URL)
-        magic_token: MagicToken instance
-
-    Returns:
-        bool: True if email sent successfully
-    """
-    verify_path = reverse("auth:verify", kwargs={"token": magic_token.token})
-    verify_url = request.build_absolute_uri(verify_path)
-
-    # Print URL directly to console in development (bypasses MIME encoding)
-    if settings.DEBUG:
-        print("\n" + "=" * 60)
-        print("MAGIC LINK (click or copy):")
-        print(verify_url)
-        print("=" * 60 + "\n")
-
-    subject = "Your PyRunner Login Link"
-
-    text_message = f"""Hi there!
-
-Click the link below to sign in to PyRunner:
-
-========================================
-{verify_url}
-========================================
-
-This link will expire in 15 minutes and can only be used once.
-
-If you didn't request this link, you can safely ignore this email.
-
----
-PyRunner - Python Script Automation
-"""
-
-    html_message = f"""<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <style>
-        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; }}
-        .container {{ max-width: 600px; margin: 0 auto; padding: 40px 20px; }}
-        .button {{ display: inline-block; background: #2563eb; color: #ffffff !important; padding: 14px 28px; text-decoration: none; border-radius: 6px; font-weight: 600; }}
-        .footer {{ margin-top: 40px; padding-top: 20px; border-top: 1px solid #e5e7eb; color: #6b7280; font-size: 14px; }}
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h2>Sign in to PyRunner</h2>
-        <p>Click the button below to sign in:</p>
-        <p style="margin: 30px 0;">
-            <a href="{verify_url}" class="button">Sign In to PyRunner</a>
-        </p>
-        <p style="color: #6b7280; font-size: 14px;">
-            This link expires in 15 minutes and can only be used once.
-        </p>
-        <p style="color: #6b7280; font-size: 14px;">
-            Or copy and paste this URL into your browser:<br>
-            <code style="background: #f3f4f6; padding: 2px 6px; border-radius: 4px;">{verify_url}</code>
-        </p>
-        <div class="footer">
-            <p>If you didn't request this link, you can safely ignore this email.</p>
-            <p><strong>PyRunner</strong> - Python Script Automation</p>
-        </div>
-    </div>
-</body>
-</html>"""
-
-    return _send_email(magic_token.email, subject, text_message, html_message)
 
 
 def send_password_reset_email(request, user, reset_token) -> bool:

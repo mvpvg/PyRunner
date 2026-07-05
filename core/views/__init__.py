@@ -1,7 +1,7 @@
 """
 Views for the core app.
 """
-from .auth import login_view, logout_view, verify_view, magic_link_sent_view
+from .auth import login_view, logout_view, accept_invite_view
 from .dashboard import dashboard_view
 from .scripts import (
     script_list_view,
@@ -34,8 +34,7 @@ __all__ = [
     # Auth
     "login_view",
     "logout_view",
-    "verify_view",
-    "magic_link_sent_view",
+    "accept_invite_view",
     # Dashboard
     "dashboard_view",
     # Scripts
