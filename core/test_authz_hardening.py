@@ -224,3 +224,34 @@ class BulkRequirementsInjectionTests(TestCase):
         self.assertFalse(success)
         self.assertIn("not allowed", err.lower())
         run.assert_not_called()
+
+
+class ContentSecurityPolicyTests(TestCase):
+    """Defense-in-depth (audit item 7): HTML responses carry the scoped CSP.
+
+    The policy hardens clickjacking / base-tag / object / form exfiltration but
+    intentionally leaves script-src unset so the app's inline scripts and event
+    handlers keep working (a strict script-src is a separate nonce refactor).
+    """
+
+    def setUp(self):
+        _mock_setup(self)
+        self.superuser = User.objects.create(email="root@example.com", is_superuser=True)
+
+    def test_html_response_has_scoped_csp_header(self):
+        self.client.force_login(self.superuser)
+        resp = self.client.get(reverse("cpanel:dashboard"))
+        csp = resp.headers.get("Content-Security-Policy", "")
+        self.assertIn("frame-ancestors 'none'", csp)
+        self.assertIn("object-src 'none'", csp)
+        self.assertIn("base-uri 'none'", csp)
+        self.assertIn("form-action 'self'", csp)
+        # Must NOT constrain scripts/styles — that would break inline handlers.
+        self.assertNotIn("script-src", csp)
+        self.assertNotIn("style-src", csp)
+
+    def test_json_api_response_has_no_csp(self):
+        self.client.force_login(self.superuser)
+        resp = self.client.get(reverse("cpanel:logs_api"))
+        # CSP only governs document contexts; the header is scoped to text/html.
+        self.assertNotIn("Content-Security-Policy", resp.headers)

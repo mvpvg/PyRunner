@@ -73,6 +73,7 @@ NPM_BIN_PATH = os.environ.get("NPM_BIN_PATH", shutil.which("npm") or "npm")
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    "pyrunner.middleware.ContentSecurityPolicyMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",
     "pyrunner.middleware.NoCacheMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
@@ -624,10 +625,21 @@ if not DEBUG:
 SECURE_CONTENT_TYPE_NOSNIFF = True
 X_FRAME_OPTIONS = "DENY"
 
-# Note: For Content Security Policy (CSP), install django-csp and add to middleware:
-# pip install django-csp
-# Add 'csp.middleware.CSPMiddleware' to MIDDLEWARE
-# Then configure CSP_* settings as needed
+# Content-Security-Policy (defense-in-depth), applied to HTML responses by
+# pyrunner.middleware.ContentSecurityPolicyMiddleware. Deliberately SCOPED: it
+# hardens clickjacking (frame-ancestors, superseding X_FRAME_OPTIONS in modern
+# browsers), <base>/<object> injection, and cross-origin form submission — but
+# does NOT set script-src/style-src, because the templates rely on inline
+# <script> blocks and inline event handlers (onclick/onsubmit/...). Dropping
+# 'unsafe-inline' from script-src is the real XSS backstop but requires migrating
+# every inline script to a per-request nonce and rewiring inline handlers to
+# addEventListener first — tracked as a separate hardening task.
+CONTENT_SECURITY_POLICY = (
+    "base-uri 'none'; "
+    "object-src 'none'; "
+    "frame-ancestors 'none'; "
+    "form-action 'self'"
+)
 
 
 # =============================================================================
