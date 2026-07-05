@@ -138,3 +138,36 @@ class EnvironmentAuthzTests(TestCase):
         self.client.force_login(self.superuser)
         resp = self.client.get(reverse("cpanel:environment_create"))
         self.assertEqual(resp.status_code, 200)
+
+
+class LogsAuthzTests(TestCase):
+    """Vuln 4 — the shared application log is superuser-only to read.
+
+    The log is not workspace-scoped, so a member reading it is cross-tenant
+    disclosure. Gating matches the destructive ``logs_clear_view`` sibling.
+    """
+
+    def setUp(self):
+        _mock_setup(self)
+        self.member = User.objects.create(email="member@example.com")  # non-superuser
+        self.superuser = User.objects.create(email="root@example.com", is_superuser=True)
+        self.login_path = reverse("auth:login")
+
+    def test_member_denied_on_logs_page(self):
+        self.client.force_login(self.member)
+        resp = self.client.get(reverse("cpanel:logs"))
+        self.assertEqual(resp.status_code, 302)
+        self.assertTrue(resp["Location"].startswith(self.login_path))
+
+    def test_member_denied_on_logs_api(self):
+        self.client.force_login(self.member)
+        resp = self.client.get(reverse("cpanel:logs_api"))
+        self.assertEqual(resp.status_code, 403)
+        self.assertFalse(resp.json()["success"])
+
+    def test_superuser_can_read_logs(self):
+        self.client.force_login(self.superuser)
+        self.assertEqual(self.client.get(reverse("cpanel:logs")).status_code, 200)
+        api = self.client.get(reverse("cpanel:logs_api"))
+        self.assertEqual(api.status_code, 200)
+        self.assertTrue(api.json()["success"])
