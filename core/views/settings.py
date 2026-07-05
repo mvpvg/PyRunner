@@ -74,6 +74,7 @@ def settings_view(request: HttpRequest) -> HttpResponse:
 
 
 @login_required
+@superuser_required
 @require_POST
 def toggle_global_pause_view(request: HttpRequest) -> HttpResponse:
     """Toggle global schedule pause."""
@@ -90,6 +91,7 @@ def toggle_global_pause_view(request: HttpRequest) -> HttpResponse:
 
 
 @login_required
+@superuser_required
 @require_POST
 def notification_settings_view(request: HttpRequest) -> HttpResponse:
     """Update notification settings."""
@@ -141,6 +143,7 @@ def test_email_view(request: HttpRequest) -> JsonResponse:
 
 
 @login_required
+@superuser_required
 @require_POST
 def general_settings_view(request: HttpRequest) -> HttpResponse:
     """Update general settings."""
@@ -178,6 +181,7 @@ def recaptcha_settings_view(request: HttpRequest) -> HttpResponse:
 
 
 @login_required
+@superuser_required
 @require_POST
 def retention_settings_view(request: HttpRequest) -> HttpResponse:
     """Update log retention settings."""
@@ -196,6 +200,7 @@ def retention_settings_view(request: HttpRequest) -> HttpResponse:
 
 
 @login_required
+@superuser_required
 @require_POST
 def worker_settings_view(request: HttpRequest) -> HttpResponse:
     """Update worker settings."""
@@ -325,6 +330,7 @@ def restart_workers_view(request: HttpRequest) -> JsonResponse:
 
 
 @login_required
+@superuser_required
 @require_POST
 def manual_cleanup_view(request: HttpRequest) -> HttpResponse:
     """Trigger manual cleanup of old runs."""
