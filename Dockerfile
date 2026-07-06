@@ -51,5 +51,11 @@ RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh
 # Expose port
 EXPOSE 8000
 
+# Healthcheck (mirrors docker-compose.yml so `docker run` users get it too).
+# start-period covers first-boot migrations + plugin preflight before gunicorn
+# is reachable. PORT is pinned to 8000 inside the container.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/')"
+
 # Set entrypoint
 ENTRYPOINT ["/entrypoint.sh"]
