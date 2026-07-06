@@ -154,6 +154,42 @@ from django.db.backends.signals import connection_created
 connection_created.connect(_enable_sqlite_wal)
 
 
+# Cache
+# https://docs.djangoproject.com/en/6.0/topics/cache/
+#
+# This MUST be a cache shared across every process. Rate limiting (API + inbound
+# webhooks) and webhook idempotency/dedup use django.core.cache as a shared
+# counter/ledger — see core/views/api/decorators.py and
+# core/views/channel_webhooks.py. Django's default LocMemCache is per-process, so
+# with multiple gunicorn workers + the django-q worker those counters would NOT
+# be shared: rate limits would leak (each worker counts independently) and a
+# retried inbound webhook landing on another worker could be processed twice.
+#
+# DatabaseCache is the right default here — it shares state through a single DB
+# table with zero extra infrastructure, keeping the single-container story
+# intact, and works identically on SQLite and Postgres. Operators scaling out to
+# many workers/hosts can set REDIS_URL to switch to Redis (first-party backend,
+# needs the `redis` package which ships in requirements.txt).
+REDIS_URL = os.environ.get("REDIS_URL", "").strip()
+if REDIS_URL:
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.redis.RedisCache",
+            "LOCATION": REDIS_URL,
+        }
+    }
+else:
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.db.DatabaseCache",
+            "LOCATION": "pyrunner_cache",
+            # Rate-limit + dedup keys are many and short-lived; keep more than the
+            # 300 default so active counters aren't culled out from under us.
+            "OPTIONS": {"MAX_ENTRIES": 10000},
+        }
+    }
+
+
 # =============================================================================
 # Plugin system (safe loader)
 # =============================================================================

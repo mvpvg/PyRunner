@@ -37,6 +37,10 @@ services:
       # Worker settings
       - Q_WORKERS=${Q_WORKERS:-2}
 
+      # Cache: DatabaseCache by default (no extra service). Set REDIS_URL to use
+      # Redis instead — recommended when scaling to many workers/hosts.
+      - REDIS_URL=${REDIS_URL:-}
+
       # Gunicorn settings
       - PORT=8000
       # Display-only: the host-published port, used by entrypoint.sh's "Open
