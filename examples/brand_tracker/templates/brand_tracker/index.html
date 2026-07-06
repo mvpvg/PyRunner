@@ -1,0 +1,449 @@
+{% extends "base.html" %}
+
+{% block title %}Brand Tracker - PyRunner{% endblock %}
+
+{% block content %}
+<div class="flex">
+    {% include "cpanel/_sidebar.html" %}
+
+    <div class="flex-1 min-w-0">
+        <div class="px-5 lg:px-8 py-7 max-w-[1100px] mx-auto space-y-5">
+
+            <!-- ================= Header ================= -->
+            <div class="flex items-start justify-between gap-4 flex-wrap">
+                <div class="min-w-0">
+                    <h1 class="text-[22px] font-semibold tracking-tight">Brand Tracker</h1>
+                    {% if is_configured %}
+                    <div class="flex items-center gap-x-3 gap-y-1 flex-wrap text-xs text-muted mt-1.5">
+                        <span class="inline-flex items-center gap-1.5"><span class="w-1.5 h-1.5 rounded-full bg-ok"></span>Active</span>
+                        <span class="text-line-soft">·</span><span>Runs once per week</span>
+                        {% if schedule.next_run %}<span class="text-line-soft">·</span><span>Next {{ schedule.next_run|date:"M j, H:i" }} UTC</span>{% endif %}
+                        {% if last_run %}<span class="text-line-soft">·</span><span>Last run {{ last_run }}</span>{% endif %}
+                    </div>
+                    {% else %}
+                    <p class="text-sm text-muted mt-1">Weekly tracking of brand &amp; keyword mentions across web, news, Hacker News and Reddit.</p>
+                    {% endif %}
+                </div>
+                <div class="flex items-center gap-2">
+                    <button type="button" id="hdr-running" onclick="showTab('mentions')"
+                            class="{% if not is_active %}hidden {% endif %}inline-flex items-center gap-2 text-[13px] font-medium px-3.5 py-2 rounded-lg bg-warn/10 text-warn border border-warn/30">
+                        <span class="w-2 h-2 rounded-full bg-warn animate-pulse"></span>Tracking…
+                    </button>
+                    {% if can_run %}
+                    <form id="btn-run-form" method="post" action="{% url 'brand_tracker:run' %}" class="{% if is_active %}hidden{% endif %}">
+                        {% csrf_token %}
+                        <button type="submit" class="inline-flex items-center gap-2 text-[13px] font-medium px-3.5 py-2 rounded-lg bg-ok text-ink hover:opacity-90 transition">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"/><circle cx="12" cy="12" r="9"/></svg>
+                            Run now
+                        </button>
+                    </form>
+                    {% endif %}
+                </div>
+            </div>
+
+            <!-- ================= Tabs ================= -->
+            <div class="flex items-center gap-1.5 border-b border-line-soft pb-px">
+                <button type="button" onclick="showTab('mentions')" id="tab-mentions" class="tab-btn px-4 py-2 text-sm font-medium rounded-lg text-muted hover:text-text hover:bg-panel-hi/50 transition-colors">Mentions</button>
+                <button type="button" onclick="showTab('settings')" id="tab-settings" class="tab-btn px-4 py-2 text-sm font-medium rounded-lg text-muted hover:text-text hover:bg-panel-hi/50 transition-colors">Settings</button>
+            </div>
+
+            <!-- ================= Mentions panel ================= -->
+            <div id="panel-mentions" class="tab-panel space-y-5">
+
+                <!-- Live run banner -->
+                <section id="run-banner" class="{% if not is_active %}hidden {% endif %}rounded-2xl border border-warn/30 bg-warn/5 p-5">
+                    <div class="flex items-center justify-between gap-4 flex-wrap">
+                        <div class="flex items-center gap-3 min-w-0">
+                            <span class="flex-none w-2.5 h-2.5 rounded-full bg-warn animate-pulse"></span>
+                            <div class="min-w-0">
+                                <h2 class="text-sm font-semibold text-text">Tracking in progress</h2>
+                                <p id="run-label" class="text-xs text-muted mt-0.5">Starting…</p>
+                            </div>
+                        </div>
+                        <form method="post" action="{% url 'brand_tracker:stop' %}">
+                            {% csrf_token %}
+                            <button type="submit" onclick="return confirm('Stop the running tracker?');" class="text-[13px] font-medium px-3 py-1.5 rounded-lg border border-fail/30 text-fail hover:bg-fail/10 transition">Stop</button>
+                        </form>
+                    </div>
+                    <div class="mt-4 h-1.5 w-full rounded-full bg-panel-hi overflow-hidden">
+                        <div id="run-bar" class="h-full bg-warn rounded-full transition-all duration-500" style="width: 8%"></div>
+                    </div>
+                </section>
+
+                {% if not is_configured %}
+                <section class="rounded-2xl border border-line bg-panel px-6 py-14 text-center">
+                    <h3 class="text-base font-semibold mb-1">Not configured yet</h3>
+                    <p class="text-sm text-muted mb-6">Add your keywords and Serper key in <button type="button" onclick="showTab('settings')" class="text-ok hover:underline">Settings</button> and save to start tracking.</p>
+                </section>
+                {% elif not has_data %}
+                <section class="rounded-2xl border border-line bg-panel px-6 py-14 text-center">
+                    <h3 class="text-base font-semibold mb-1">No mentions yet</h3>
+                    <p class="text-sm text-muted mb-6">Use <span class="font-mono text-text">Run now</span> above, or wait for the weekly run. The first run fills this feed without emailing you.</p>
+                </section>
+                {% else %}
+
+                <!-- Stat cards -->
+                <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
+                    <div class="rounded-2xl border border-line bg-panel p-4">
+                        <div class="text-[11px] uppercase tracking-wide text-faint">In feed</div>
+                        <div class="text-2xl font-semibold mt-1">{{ window_total }}</div>
+                        <div class="text-xs text-faint mt-0.5">last {{ form.retention_days.value|default:90 }} days</div>
+                    </div>
+                    <div class="rounded-2xl border border-line bg-panel p-4">
+                        <div class="text-[11px] uppercase tracking-wide text-faint">All time</div>
+                        <div class="text-2xl font-semibold mt-1">{{ total_all_time }}</div>
+                        <div class="text-xs text-faint mt-0.5">mentions found</div>
+                    </div>
+                    <div class="rounded-2xl border border-line bg-panel p-4">
+                        <div class="text-[11px] uppercase tracking-wide text-faint">Serper credits</div>
+                        <div class="text-2xl font-semibold mt-1">{{ credit_used }}{% if credit_cap %}<span class="text-base text-faint font-normal"> / {{ credit_cap }}</span>{% endif %}</div>
+                        {% if credit_cap %}
+                        <div class="mt-2 h-1.5 w-full rounded-full bg-panel-hi overflow-hidden"><div class="h-full {% if credit_pct >= 100 %}bg-fail{% elif credit_pct >= 80 %}bg-warn{% else %}bg-ok{% endif %} rounded-full" style="width: {{ credit_pct }}%"></div></div>
+                        {% else %}<div class="text-xs text-faint mt-0.5">this month · no cap</div>{% endif %}
+                    </div>
+                    <div class="rounded-2xl border border-line bg-panel p-4">
+                        <div class="text-[11px] uppercase tracking-wide text-faint">Last run</div>
+                        <div class="text-sm font-semibold mt-2">{{ last_run|default:"—" }}</div>
+                        <div class="text-xs text-faint mt-0.5">weekly schedule</div>
+                    </div>
+                </div>
+
+                <!-- Keyword breakdown -->
+                {% if by_keyword %}
+                <div class="flex flex-wrap gap-2">
+                    {% for kw, count in by_keyword %}
+                    <span class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-panel-hi text-xs text-muted">
+                        {{ kw }}<span class="text-faint">{{ count }}</span>
+                    </span>
+                    {% endfor %}
+                </div>
+                {% endif %}
+
+                <!-- Filters -->
+                <div class="flex items-center gap-3 flex-wrap">
+                    <input type="text" id="feed-search" placeholder="Filter mentions…"
+                           class="flex-1 min-w-[180px] px-3.5 py-2 bg-ink border border-line rounded-lg text-text text-sm focus:outline-none focus:ring-2 focus:ring-ok/30 focus:border-ok/60">
+                    <select id="feed-keyword" class="px-3 py-2 bg-ink border border-line rounded-lg text-text text-sm">
+                        <option value="">All keywords</option>
+                        {% for kw in feed_keywords %}<option value="{{ kw }}">{{ kw }}</option>{% endfor %}
+                    </select>
+                    <select id="feed-source" class="px-3 py-2 bg-ink border border-line rounded-lg text-text text-sm">
+                        <option value="">All sources</option>
+                        {% for s in feed_sources %}<option value="{{ s }}">{{ s }}</option>{% endfor %}
+                    </select>
+                </div>
+
+                <!-- Feed -->
+                <div id="feed" class="space-y-3">
+                    {% for m in feed %}
+                    <article class="feed-item rounded-2xl border border-line bg-panel p-4"
+                             data-keyword="{{ m.keyword }}" data-source="{{ m.source_label }}"
+                             data-text="{{ m.title|lower }} {{ m.snippet|lower }} {{ m.keyword|lower }}">
+                        <div class="flex items-start justify-between gap-3">
+                            <a href="{{ m.url }}" target="_blank" rel="noopener" class="text-[15px] font-semibold text-text hover:text-ok transition leading-snug min-w-0">{{ m.title }}</a>
+                            <div class="flex items-center gap-1.5 flex-none">
+                                <span class="px-2 py-0.5 text-[11px] font-medium rounded-md" style="background:{{ m.source_color }}1a;color:{{ m.source_color }}">{{ m.source_label }}</span>
+                                {% if m.sentiment_label %}<span class="px-2 py-0.5 text-[11px] font-medium rounded-md" style="background:{{ m.sentiment_color }}1a;color:{{ m.sentiment_color }}">{{ m.sentiment_label }}</span>{% endif %}
+                            </div>
+                        </div>
+                        {% if m.snippet %}<p class="text-sm text-muted mt-1.5 leading-relaxed">{{ m.snippet }}</p>{% endif %}
+                        <div class="flex items-center gap-x-2.5 gap-y-1 flex-wrap mt-2 text-xs text-faint">
+                            <span class="inline-flex items-center gap-1.5"><span class="w-1.5 h-1.5 rounded-full bg-ok/70"></span>{{ m.keyword }}</span>
+                            {% if m.source_type %}<span class="text-line-soft">·</span><span>{{ m.source_type }}</span>{% endif %}
+                            <span class="text-line-soft">·</span><span>{{ m.found_at }}</span>
+                            <span class="text-line-soft">·</span><a href="{{ m.url }}" target="_blank" rel="noopener" class="truncate max-w-[320px] hover:text-muted">{{ m.url }}</a>
+                        </div>
+                    </article>
+                    {% endfor %}
+                    <p id="feed-empty" class="hidden text-sm text-faint text-center py-8">No mentions match your filter.</p>
+                </div>
+
+                <!-- Run history -->
+                {% if history %}
+                <section class="rounded-2xl border border-line bg-panel overflow-hidden">
+                    <div class="px-5 py-4 border-b border-line-soft"><h2 class="text-sm font-semibold">Run history</h2></div>
+                    <div class="overflow-x-auto">
+                    <table class="w-full">
+                        <thead><tr class="border-b border-line-soft text-left">
+                            <th class="px-5 py-2.5 eyebrow text-faint font-normal">When</th>
+                            <th class="px-5 py-2.5 eyebrow text-faint font-normal">Status</th>
+                            <th class="px-5 py-2.5 eyebrow text-faint font-normal text-right">New</th>
+                            <th class="px-5 py-2.5 eyebrow text-faint font-normal">By source</th>
+                        </tr></thead>
+                        <tbody class="divide-y divide-line-soft">
+                            {% for r in history %}
+                            <tr class="hover:bg-panel-hi/50 transition-colors">
+                                <td class="px-5 py-2.5 text-xs font-mono text-faint whitespace-nowrap">{{ r.ts }}</td>
+                                <td class="px-5 py-2.5"><span class="inline-flex items-center gap-1.5 px-2 py-0.5 text-xs rounded-md {{ r.badge.cls }}"><span class="w-1.5 h-1.5 rounded-full {{ r.badge.dot }}"></span>{{ r.badge.label }}</span>{% if r.seeded_run %}<span class="ml-1.5 text-[11px] text-faint">seed</span>{% endif %}{% if r.cap_reached %}<span class="ml-1.5 text-[11px] text-warn">cap</span>{% endif %}</td>
+                                <td class="px-5 py-2.5 text-sm text-muted text-right font-mono">{{ r.new_count }}</td>
+                                <td class="px-5 py-2.5 text-xs text-faint">{{ r.sources }}</td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                    </div>
+                </section>
+                {% endif %}
+                {% endif %}
+            </div>
+
+            <!-- ================= Settings panel ================= -->
+            <div id="panel-settings" class="tab-panel hidden">
+                {% if not has_environments %}
+                <section class="rounded-2xl border border-warn/30 bg-warn/10 p-4 text-sm text-muted mb-5">
+                    No environments yet. Create one with <span class="font-mono text-text">requests</span> under
+                    <a href="{% url 'cpanel:environment_list' %}" class="text-ok hover:underline">Environments</a>, then come back to configure the tracker.
+                </section>
+                {% endif %}
+
+                <form id="settings-form" method="post" action="{% url 'brand_tracker:save' %}" class="rounded-2xl border border-line bg-panel overflow-hidden">
+                    {% csrf_token %}
+                    <div class="px-5 py-4 border-b border-line-soft">
+                        <h2 class="text-sm font-semibold">Settings</h2>
+                        <p class="text-xs text-faint mt-0.5">Saving provisions the managed tracker script, its secrets, a data store and a weekly schedule. Re-saving updates them in place.</p>
+                    </div>
+
+                    <div class="p-5 space-y-6">
+                        <!-- What to track -->
+                        <div>
+                            <h3 class="eyebrow text-faint mb-3">What to track</h3>
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                {% include "brand_tracker/_field.html" with field=form.keywords %}
+                                {% include "brand_tracker/_field.html" with field=form.excluded_domains %}
+                            </div>
+                            <div class="mt-4 max-w-xs">{% include "brand_tracker/_field.html" with field=form.num_results %}</div>
+                        </div>
+
+                        <!-- Sources -->
+                        <div>
+                            <div class="flex items-center justify-between mb-3">
+                                <h3 class="eyebrow text-faint">Sources &amp; Serper key</h3>
+                                <button type="button" id="btn-test-serper" onclick="testSerper()" class="text-xs font-medium px-2.5 py-1 rounded-md border border-line text-muted hover:text-text hover:bg-panel-hi transition">Test Serper key</button>
+                            </div>
+                            <p class="text-xs text-faint mb-3">Google web search (Serper) is always on. News also uses Serper credits; Hacker News and Reddit are free.</p>
+                            <div class="space-y-2.5">
+                                <label class="flex items-center gap-2.5 cursor-pointer">{{ form.news_enabled }}<span class="text-sm text-text">{{ form.news_enabled.label }}</span></label>
+                                <label class="flex items-center gap-2.5 cursor-pointer">{{ form.hackernews_enabled }}<span class="text-sm text-text">{{ form.hackernews_enabled.label }}</span></label>
+                                <label class="flex items-center gap-2.5 cursor-pointer">{{ form.reddit_enabled }}<span class="text-sm text-text">{{ form.reddit_enabled.label }}</span></label>
+                            </div>
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
+                                {% include "brand_tracker/_field.html" with field=form.serper_api_key %}
+                            </div>
+                            <div id="reddit-creds" class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
+                                {% include "brand_tracker/_field.html" with field=form.reddit_client_id %}
+                                {% include "brand_tracker/_field.html" with field=form.reddit_client_secret %}
+                            </div>
+                            <div id="test-serper-result" class="hidden text-xs mt-2"></div>
+                            <p class="text-xs text-faint mt-3">Estimated cost: <span id="credit-estimate" class="text-muted font-medium">—</span></p>
+                        </div>
+
+                        <!-- AI enrichment -->
+                        <div>
+                            <h3 class="eyebrow text-faint mb-3">AI enrichment</h3>
+                            <p class="text-xs text-faint mb-3">Optionally tag each mention with a source type and sentiment. Claude uses your PyRunner Claude AI integration (needs <span class="font-mono text-text">claude-agent-sdk</span> in the environment); OpenRouter uses your own key. Mentions are stored without tags if enrichment is unavailable.</p>
+                            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                                {% include "brand_tracker/_field.html" with field=form.enrich_provider %}
+                                {% include "brand_tracker/_field.html" with field=form.enrich_model row_id="row-enrich-model" %}
+                                {% include "brand_tracker/_field.html" with field=form.openrouter_api_key row_id="row-openrouter-key" %}
+                            </div>
+                        </div>
+
+                        <!-- Retention & budget -->
+                        <div>
+                            <h3 class="eyebrow text-faint mb-3">Retention &amp; budget</h3>
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                {% include "brand_tracker/_field.html" with field=form.retention_days %}
+                                {% include "brand_tracker/_field.html" with field=form.monthly_credit_cap %}
+                            </div>
+                        </div>
+
+                        <!-- Email report -->
+                        <div>
+                            <h3 class="eyebrow text-faint mb-3">Email report (optional)</h3>
+                            <label class="flex items-center gap-2.5 cursor-pointer mb-3">{{ form.email_enabled }}<span class="text-sm text-text">{{ form.email_enabled.label }}</span></label>
+                            <div id="email-fields" class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                                {% include "brand_tracker/_field.html" with field=form.email_to %}
+                                {% include "brand_tracker/_field.html" with field=form.email_from %}
+                                {% include "brand_tracker/_field.html" with field=form.resend_api_key %}
+                            </div>
+                        </div>
+
+                        <!-- Environment & schedule -->
+                        <div>
+                            <h3 class="eyebrow text-faint mb-3">Environment &amp; schedule</h3>
+                            <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+                                {% include "brand_tracker/_field.html" with field=form.environment %}
+                                {% include "brand_tracker/_field.html" with field=form.schedule_weekday %}
+                                {% include "brand_tracker/_field.html" with field=form.schedule_time %}
+                                {% include "brand_tracker/_field.html" with field=form.timezone %}
+                            </div>
+                        </div>
+
+                        <!-- Alerts -->
+                        <div>
+                            <h3 class="eyebrow text-faint mb-3">Operational alerts</h3>
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                {% include "brand_tracker/_field.html" with field=form.notify_on %}
+                                {% include "brand_tracker/_field.html" with field=form.notify_email %}
+                            </div>
+                            <p class="text-xs text-faint mt-2">These are run-failure alerts via <a href="{% url 'cpanel:settings' %}" class="text-ok hover:underline">Settings → Notifications</a> — separate from the mention report above.</p>
+                        </div>
+                    </div>
+
+                    <div class="px-5 py-4 border-t border-line-soft flex justify-end">
+                        <button type="submit" class="inline-flex items-center gap-2 text-[13px] font-medium px-4 py-2 rounded-lg bg-ok text-ink hover:opacity-90 transition">Save settings</button>
+                    </div>
+                </form>
+            </div>
+
+        </div>
+    </div>
+</div>
+
+<script>
+(function () {
+    const IS_CONFIGURED = {{ is_configured|yesno:"true,false" }};
+    const HAS_DATA = {{ has_data|yesno:"true,false" }};
+
+    // ---- Tabs ----
+    window.showTab = function (name) {
+        document.querySelectorAll('.tab-panel').forEach(p => p.classList.add('hidden'));
+        document.querySelectorAll('.tab-btn').forEach(t => {
+            t.classList.remove('bg-panel-hi', 'text-text');
+            t.classList.add('text-muted', 'hover:text-text', 'hover:bg-panel-hi/50');
+        });
+        const panel = document.getElementById('panel-' + name);
+        const tab = document.getElementById('tab-' + name);
+        if (!panel || !tab) return;
+        panel.classList.remove('hidden');
+        tab.classList.remove('text-muted', 'hover:text-text', 'hover:bg-panel-hi/50');
+        tab.classList.add('bg-panel-hi', 'text-text');
+        if (history.replaceState) history.replaceState(null, '', '#' + name);
+    };
+    const initial = (location.hash === '#settings' || location.hash === '#mentions')
+        ? location.hash.slice(1)
+        : ((IS_CONFIGURED && HAS_DATA) ? 'mentions' : 'settings');
+    showTab(initial);
+
+    // ---- Conditional field groups ----
+    function bindToggle(checkboxId, groupId) {
+        const cb = document.getElementById(checkboxId);
+        const grp = document.getElementById(groupId);
+        if (!cb || !grp) return;
+        const apply = () => { grp.style.display = cb.checked ? '' : 'none'; };
+        cb.addEventListener('change', apply); apply();
+    }
+    bindToggle('{{ form.reddit_enabled.id_for_label }}', 'reddit-creds');
+    bindToggle('{{ form.email_enabled.id_for_label }}', 'email-fields');
+
+    // ---- AI enrichment fields follow the chosen provider ----
+    (function () {
+        const sel = document.getElementById('{{ form.enrich_provider.id_for_label }}');
+        const model = document.getElementById('row-enrich-model');
+        const orKey = document.getElementById('row-openrouter-key');
+        if (!sel) return;
+        const apply = () => {
+            if (model) model.style.display = (sel.value === 'off') ? 'none' : '';
+            if (orKey) orKey.style.display = (sel.value === 'openrouter') ? '' : 'none';
+        };
+        sel.addEventListener('change', apply); apply();
+    })();
+
+    // ---- Live credit estimate ----
+    const kwEl = document.getElementById('{{ form.keywords.id_for_label }}');
+    const newsEl = document.getElementById('{{ form.news_enabled.id_for_label }}');
+    const numEl = document.getElementById('{{ form.num_results.id_for_label }}');
+    const estEl = document.getElementById('credit-estimate');
+    function estimate() {
+        if (!estEl) return;
+        const kws = (kwEl ? kwEl.value : '').split('\n').filter(s => s.trim()).length || 0;
+        const sources = 1 + ((newsEl && newsEl.checked) ? 1 : 0);
+        const mult = ((numEl && parseInt(numEl.value, 10) > 10) ? 2 : 1);
+        const perWeek = kws * sources * mult;
+        estEl.textContent = perWeek === 0 ? '—'
+            : '≈ ' + perWeek + ' Serper credit' + (perWeek === 1 ? '' : 's') + '/week (~' + Math.round(perWeek * 4.3) + '/mo). HN + Reddit are free.';
+    }
+    [kwEl, newsEl, numEl].forEach(el => { if (el) { el.addEventListener('input', estimate); el.addEventListener('change', estimate); } });
+    estimate();
+
+    // ---- Feed filtering ----
+    const search = document.getElementById('feed-search');
+    const fKw = document.getElementById('feed-keyword');
+    const fSrc = document.getElementById('feed-source');
+    function filterFeed() {
+        const q = (search ? search.value : '').toLowerCase().trim();
+        const kw = fKw ? fKw.value : '';
+        const src = fSrc ? fSrc.value : '';
+        let shown = 0;
+        document.querySelectorAll('.feed-item').forEach(it => {
+            const ok = (!q || it.dataset.text.includes(q))
+                && (!kw || it.dataset.keyword === kw)
+                && (!src || it.dataset.source === src);
+            it.style.display = ok ? '' : 'none';
+            if (ok) shown++;
+        });
+        const empty = document.getElementById('feed-empty');
+        if (empty) empty.classList.toggle('hidden', shown > 0);
+    }
+    [search, fKw, fSrc].forEach(el => { if (el) { el.addEventListener('input', filterFeed); el.addEventListener('change', filterFeed); } });
+
+    // ---- Test Serper key ----
+    function csrf() {
+        const el = document.querySelector('#settings-form [name=csrfmiddlewaretoken]');
+        return el ? el.value : '';
+    }
+    window.testSerper = function () {
+        const btn = document.getElementById('btn-test-serper');
+        const out = document.getElementById('test-serper-result');
+        const body = new URLSearchParams();
+        body.append('csrfmiddlewaretoken', csrf());
+        const k = document.getElementById('{{ form.serper_api_key.id_for_label }}');
+        if (k) body.append('serper_api_key', k.value);
+        btn.disabled = true; const orig = btn.textContent; btn.textContent = 'Testing…';
+        out.className = 'text-xs mt-2 text-muted'; out.classList.remove('hidden'); out.textContent = 'Testing connection…';
+        fetch("{% url 'brand_tracker:test_serper' %}", { method: 'POST', headers: { 'X-Requested-With': 'XMLHttpRequest' }, body })
+            .then(r => r.json())
+            .then(d => { out.textContent = d.message; out.className = 'text-xs mt-2 ' + (d.ok ? 'text-ok' : 'text-fail'); })
+            .catch(() => { out.textContent = 'Test failed to run.'; out.className = 'text-xs mt-2 text-fail'; })
+            .finally(() => { btn.disabled = false; btn.textContent = orig; });
+    };
+
+    // ---- Live status polling ----
+    let wasActive = {{ is_active|yesno:"true,false" }};
+    function render(d) {
+        const banner = document.getElementById('run-banner');
+        const hdr = document.getElementById('hdr-running');
+        const runForm = document.getElementById('btn-run-form');
+        if (d.active) {
+            if (banner) banner.classList.remove('hidden');
+            if (hdr) hdr.classList.remove('hidden');
+            if (runForm) runForm.classList.add('hidden');
+            const bar = document.getElementById('run-bar');
+            const label = document.getElementById('run-label');
+            const p = d.progress;
+            if (p && p.total > 0) {
+                const pct = Math.max(4, Math.min(100, Math.round((p.index / p.total) * 100)));
+                if (bar) bar.style.width = pct + '%';
+                if (label) label.textContent = 'Searching "' + (p.keyword || '') + '" (' + p.index + '/' + p.total + ')';
+            } else {
+                if (bar) bar.style.width = '12%';
+                const st = d.run ? d.run.status : 'running';
+                if (label) label.textContent = (st === 'pending') ? 'Queued…' : 'Running…';
+            }
+        } else {
+            if (wasActive) { window.location.reload(); return; }
+            if (banner) banner.classList.add('hidden');
+            if (hdr) hdr.classList.add('hidden');
+            if (runForm) runForm.classList.remove('hidden');
+        }
+    }
+    function poll() {
+        fetch("{% url 'brand_tracker:status' %}", { headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+            .then(r => r.json())
+            .then(d => { render(d); if (d.active) { wasActive = true; setTimeout(poll, 2500); } })
+            .catch(() => setTimeout(poll, 5000));
+    }
+    if (IS_CONFIGURED) poll();
+})();
+</script>
+{% endblock %}
