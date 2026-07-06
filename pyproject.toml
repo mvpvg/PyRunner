@@ -1,0 +1,35 @@
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+# Generated code, vendored assets, runtime-uploaded plugins, and illustrative
+# example plugins are not linted.
+extend-exclude = [
+    "core/migrations",
+    "theme",
+    "examples",
+    "landing",
+    "design-preview",
+    "staticfiles",
+    "plugins",
+]
+
+[tool.ruff.lint]
+# Default rule set (pyflakes + a subset of pycodestyle). This enforces the
+# high-value checks immediately — syntax errors (E9) and real bugs like undefined
+# names / redefinitions (F8xx).
+#
+# The codes below are IGNORED as an intentionally lenient baseline: each has
+# pre-existing hits in the tree today, and a repo-wide auto-fix would collide
+# with in-flight feature work. Re-enable them incrementally with a dedicated
+# cleanup once that work has merged (tracked in docs/PLAN_optimization.md).
+ignore = [
+    "E402",  # module-import-not-at-top — intentional in settings.py (WAL signal + plugin loader)
+    "F401",  # unused-import (~18) — cleanup pending
+    "F541",  # f-string-without-placeholders (~6) — cleanup pending
+    "F841",  # unused local variable (~5) — cleanup pending
+    "E702",  # multiple-statements-on-one-line (semicolon) (~2) — cleanup pending
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Re-exports in package __init__ files are not "unused".
+"__init__.py" = ["F401"]

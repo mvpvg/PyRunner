@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      # Non-secret CI values. SECRET_KEY is always required; ENCRYPTION_KEY is a
+      # valid throwaway Fernet key (base64 of 32 bytes). DEBUG=True keeps
+      # production-only requirements (SSL redirect, etc.) out of the test run.
+      SECRET_KEY: ci-not-a-real-secret-key
+      ENCRYPTION_KEY: QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE=
+      DEBUG: "True"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Django system check
+        run: python manage.py check
+      - name: Run tests (SQLite)
+        run: python manage.py test core --verbosity=2
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install Ruff
+        run: pip install ruff
+      - name: Ruff lint
+        run: ruff check .
