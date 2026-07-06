@@ -281,6 +281,7 @@ def _record_usage(result: "ClaudeResult", source: str = "script") -> None:
         "run_id": os.environ.get("PYRUNNER_RUN_ID") or None,
         "script_name": os.environ.get("PYRUNNER_SCRIPT_NAME", "") or "",
         "source": source,
+        "provider": os.environ.get("PYRUNNER_AI_PROVIDER", "") or "",
         "model": result.model or "",
         "input_tokens": int(result.input_tokens or 0),
         "output_tokens": int(result.output_tokens or 0),
@@ -314,10 +315,11 @@ def _record_usage_sqlite(db_path: str, payload: dict) -> None:
             conn.execute(
                 """
                 INSERT INTO claude_usage (
-                    id, created_at, script_id, run_id, script_name, source, model,
+                    id, created_at, script_id, run_id, script_name, source,
+                    provider, model,
                     input_tokens, output_tokens, cache_creation_tokens,
                     cache_read_tokens, num_turns, duration_ms, cost_usd
-                ) VALUES (?, datetime('now'), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, datetime('now'), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     _uuid.uuid4().hex,
@@ -325,6 +327,7 @@ def _record_usage_sqlite(db_path: str, payload: dict) -> None:
                     payload["run_id"],
                     payload["script_name"],
                     payload["source"],
+                    payload.get("provider", ""),
                     payload["model"],
                     payload["input_tokens"],
                     payload["output_tokens"],

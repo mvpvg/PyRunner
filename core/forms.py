@@ -1934,95 +1934,184 @@ class S3SettingsForm(forms.Form):
         return instance
 
 
-class ClaudeSettingsForm(forms.Form):
-    """Form for Claude AI integration configuration."""
-
-    from core.models import GlobalSettings as _GS
+class AISettingsForm(forms.Form):
+    """Master AI toggle + active provider selection (Services → AI Provider)."""
 
     claude_enabled = forms.BooleanField(
         required=False,
         initial=False,
         widget=forms.CheckboxInput(attrs={"class": CHECK_CLASS}),
-        label="Enable Claude AI for scripts",
+        label="Enable AI for scripts",
     )
 
-    claude_auth_method = forms.ChoiceField(
+    active_provider = forms.UUIDField(
         required=False,
-        choices=_GS.ClaudeAuthMethod.choices,
-        initial=_GS.ClaudeAuthMethod.SUBSCRIPTION,
         widget=forms.Select(attrs={"class": CONSOLE_INPUT_CLASS}),
-        label="Authentication method",
-    )
-
-    claude_oauth_token = forms.CharField(
-        required=False,
-        widget=forms.PasswordInput(
-            attrs={
-                "class": CONSOLE_INPUT_CLASS,
-                "placeholder": "Leave blank to keep current",
-                "autocomplete": "new-password",
-            }
-        ),
-        label="Claude subscription token",
-        help_text="Run `claude setup-token` locally and paste the token it outputs (starts with sk-ant-oat01-) — NOT the authorization code shown in the browser.",
-    )
-
-    claude_api_key = forms.CharField(
-        required=False,
-        widget=forms.PasswordInput(
-            attrs={
-                "class": CONSOLE_INPUT_CLASS,
-                "placeholder": "Leave blank to keep current",
-                "autocomplete": "new-password",
-            }
-        ),
-        label="Anthropic API key",
-        help_text="Pay-per-use billing. From console.anthropic.com.",
-    )
-
-    claude_default_model = forms.CharField(
-        required=False,
-        max_length=100,
-        widget=forms.TextInput(
-            attrs={
-                "class": CONSOLE_INPUT_CLASS,
-                "placeholder": "claude-sonnet-4-6 (optional)",
-            }
-        ),
-        label="Default model",
-        help_text="Optional. Leave blank to use the account default.",
+        label="Active provider",
+        help_text="Used by scripts, Py AI, and connection tests.",
     )
 
     def __init__(self, *args, instance=None, **kwargs):
         super().__init__(*args, **kwargs)
+        from core.models import AIProvider
+
+        choices = [("", "— none —")] + [
+            (str(p.id), f"{p.name} ({p.get_provider_type_display()})")
+            for p in AIProvider.objects.all()
+        ]
+        self.fields["active_provider"].widget.choices = choices
         if instance:
             self.fields["claude_enabled"].initial = instance.claude_enabled
-            self.fields["claude_auth_method"].initial = instance.claude_auth_method
-            self.fields["claude_default_model"].initial = instance.claude_default_model
+            self.fields["active_provider"].initial = instance.active_ai_provider_id
 
     def save(self, instance):
-        """Save Claude settings to the GlobalSettings instance."""
-        from core.models import GlobalSettings
-        from core.services.encryption_service import EncryptionService
+        """Save AI settings to the GlobalSettings instance."""
+        from core.models import AIProvider
 
         instance.claude_enabled = self.cleaned_data.get("claude_enabled", False)
-        instance.claude_auth_method = (
-            self.cleaned_data.get("claude_auth_method")
-            or GlobalSettings.ClaudeAuthMethod.SUBSCRIPTION
+        provider_id = self.cleaned_data.get("active_provider")
+        instance.active_ai_provider = (
+            AIProvider.objects.filter(pk=provider_id).first() if provider_id else None
         )
-        instance.claude_default_model = self.cleaned_data.get("claude_default_model") or ""
-
-        # Only overwrite credentials when a new value is provided.
-        token = self.cleaned_data.get("claude_oauth_token")
-        if token:
-            instance.claude_oauth_token_encrypted = EncryptionService.encrypt(token)
-
-        api_key = self.cleaned_data.get("claude_api_key")
-        if api_key:
-            instance.claude_api_key_encrypted = EncryptionService.encrypt(api_key)
-
         instance.save()
         return instance
+
+
+class AIProviderForm(forms.Form):
+    """Create/edit one AIProvider profile (credential stored encrypted)."""
+
+    from core.models import AIProvider as _AIP
+
+    provider_type = forms.ChoiceField(
+        choices=_AIP.ProviderType.choices,
+        initial=_AIP.ProviderType.ANTHROPIC,
+        widget=forms.Select(attrs={"class": CONSOLE_INPUT_CLASS}),
+        label="Provider",
+    )
+
+    name = forms.CharField(
+        max_length=100,
+        widget=forms.TextInput(
+            attrs={"class": CONSOLE_INPUT_CLASS, "placeholder": "e.g. My Z.AI plan"}
+        ),
+        label="Name",
+    )
+
+    base_url = forms.CharField(
+        required=False,
+        max_length=255,
+        widget=forms.TextInput(
+            attrs={"class": CONSOLE_INPUT_CLASS, "placeholder": "https://…"}
+        ),
+        label="Endpoint URL",
+        help_text="Prefilled per provider; required for custom endpoints. Not used for Anthropic.",
+    )
+
+    auth_method = forms.ChoiceField(
+        required=False,
+        choices=_AIP.AuthMethod.choices,
+        initial=_AIP.AuthMethod.SUBSCRIPTION,
+        widget=forms.Select(attrs={"class": CONSOLE_INPUT_CLASS}),
+        label="Authentication method",
+        help_text="Anthropic only: subscription token from `claude setup-token` (starts with sk-ant-oat01-) or an API key from console.anthropic.com.",
+    )
+
+    credential = forms.CharField(
+        required=False,
+        widget=forms.PasswordInput(
+            attrs={
+                "class": CONSOLE_INPUT_CLASS,
+                "placeholder": "Leave blank to keep current",
+                "autocomplete": "new-password",
+            }
+        ),
+        label="Credential",
+    )
+
+    default_model = forms.CharField(
+        required=False,
+        max_length=100,
+        widget=forms.TextInput(
+            attrs={"class": CONSOLE_INPUT_CLASS, "placeholder": "optional"}
+        ),
+        label="Default model",
+        help_text="Used whenever this provider is active. Blank = account/endpoint default.",
+    )
+
+    def __init__(self, *args, instance=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.instance = instance
+        if instance:
+            self.fields["provider_type"].initial = instance.provider_type
+            self.fields["name"].initial = instance.name
+            self.fields["base_url"].initial = instance.base_url
+            self.fields["auth_method"].initial = instance.auth_method
+            self.fields["default_model"].initial = instance.default_model
+
+    def clean_name(self):
+        from core.models import AIProvider
+
+        name = self.cleaned_data["name"].strip()
+        qs = AIProvider.objects.filter(name__iexact=name)
+        if self.instance:
+            qs = qs.exclude(pk=self.instance.pk)
+        if qs.exists():
+            raise forms.ValidationError("A provider with this name already exists.")
+        return name
+
+    def clean(self):
+        from core.models import AIProvider, PROVIDER_PRESETS
+
+        cleaned = super().clean()
+        ptype = cleaned.get("provider_type")
+        if not ptype:
+            return cleaned
+        preset = PROVIDER_PRESETS.get(ptype, {})
+
+        # Endpoint URL: prefill from preset; custom must supply one.
+        base_url = (cleaned.get("base_url") or "").strip()
+        if ptype == AIProvider.ProviderType.ANTHROPIC:
+            base_url = ""
+        elif not base_url:
+            base_url = preset.get("base_url", "")
+            if not base_url:
+                self.add_error("base_url", "An endpoint URL is required for this provider.")
+        cleaned["base_url"] = base_url
+
+        # Auth method only means something for Anthropic.
+        if ptype != AIProvider.ProviderType.ANTHROPIC:
+            cleaned["auth_method"] = AIProvider.AuthMethod.API_KEY
+        elif not cleaned.get("auth_method"):
+            cleaned["auth_method"] = AIProvider.AuthMethod.SUBSCRIPTION
+
+        # Credential: required on create except when the preset has a default
+        # (Ollama). On edit, blank keeps the stored one.
+        has_saved = bool(self.instance and self.instance.credential_encrypted)
+        if not cleaned.get("credential") and not has_saved:
+            if not preset.get("default_credential"):
+                self.add_error("credential", "A credential is required for this provider.")
+
+        return cleaned
+
+    def save(self):
+        """Create or update the AIProvider row."""
+        from core.models import AIProvider
+        from core.services.encryption_service import EncryptionService
+
+        provider = self.instance or AIProvider()
+        provider.provider_type = self.cleaned_data["provider_type"]
+        provider.name = self.cleaned_data["name"]
+        provider.base_url = self.cleaned_data.get("base_url") or ""
+        provider.auth_method = self.cleaned_data["auth_method"]
+        provider.default_model = self.cleaned_data.get("default_model") or ""
+
+        # Only overwrite the credential when a new value is provided.
+        credential = self.cleaned_data.get("credential")
+        if credential:
+            provider.credential_encrypted = EncryptionService.encrypt(credential)
+
+        provider.save()
+        return provider
 
 
 class RecaptchaSettingsForm(forms.Form):

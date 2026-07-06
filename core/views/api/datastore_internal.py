@@ -176,6 +176,7 @@ def record_claude_usage(request: HttpRequest) -> JsonResponse:
         run_id=data.get("run_id") or None,
         script_name=data.get("script_name", "") or "",
         source=data.get("source") or ClaudeUsage.Source.SCRIPT,
+        provider=data.get("provider", "") or "",
         model=data.get("model", "") or "",
         input_tokens=int(data.get("input_tokens") or 0),
         output_tokens=int(data.get("output_tokens") or 0),

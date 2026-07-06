@@ -14,7 +14,7 @@ A self-hosted Python script automation platform. Upload a script, schedule it, m
 - **Virtual Environments** — Isolated Python environments with custom pip packages per script
 - **Run History & Logs** — Track every execution with stdout/stderr capture
 - **Secrets Management** — Store encrypted environment variables and secrets
-- **Claude AI for Scripts** — Call Claude from your scripts (web search, fetch & more) using your Claude subscription or an Anthropic API key
+- **AI for Scripts** — Call AI from your scripts using your Claude subscription, an Anthropic API key, or other providers (Z.AI GLM, OpenRouter, local Ollama, any Anthropic-compatible endpoint) — with saved provider profiles and one-click switching
 - **Notifications** — Get alerts via email, webhook, or Telegram on script completion/failure
 - **Magic Link Auth** — Passwordless authentication via email
 - **Single Container** — Deploy with one Docker command
@@ -64,12 +64,20 @@ Copy `.env.example` to `.env` and configure:
 
 See [.env.example](.env.example) for all options.
 
-## Claude AI in your scripts
+## AI in your scripts
 
-PyRunner can run Claude directly inside your Python scripts — with **web search**
-and **web fetch** enabled by default — so your automations can research, summarize,
-and reason. It reuses **your own** Claude account: either a **Claude subscription**
-(via a Claude Code OAuth token) or an **Anthropic API key**.
+PyRunner can run AI directly inside your Python scripts so your automations can
+research, summarize, and reason. It works with **your own** account on any of
+several providers — profiles are saved (keys encrypted) so you can switch the
+active provider with one click:
+
+| Provider | Credential | Notes |
+|---|---|---|
+| **Anthropic (Claude)** | Claude subscription token or API key | Full experience incl. **web search/fetch** tools |
+| **Z.AI (GLM)** | Z.AI API key | GLM models via Z.AI's Anthropic-compatible endpoint; strong tool-calling |
+| **OpenRouter** | OpenRouter API key | Hundreds of models; ids are namespaced (`deepseek/deepseek-chat`) |
+| **Ollama (local)** | none needed | Local models, requires Ollama ≥ 0.14; from Docker use `http://host.docker.internal:11434` |
+| **Custom** | your token | Any Anthropic-compatible endpoint (LiteLLM proxy, llama.cpp server, …) |
 
 > **A note on subscription auth:** this is intended for *self-hosters using their
 > own Claude subscription for their own automations* — equivalent to running
@@ -79,12 +87,16 @@ and reason. It reuses **your own** Claude account: either a **Claude subscriptio
 
 ### Setup
 
-1. **Configure it** under **Services → Claude AI**:
-   - Choose **Claude subscription** and paste a token, or **Anthropic API key**.
-   - To get a subscription token, run `claude setup-token` on a machine where
-     you're logged into Claude, then paste the result.
-   - Tick **Enable Claude AI for scripts** and **Save**, then **Test Connection**
-     (it runs a real web search to confirm everything works end-to-end).
+1. **Add a provider** under **Services → AI Provider**:
+   - Pick a provider type — the endpoint URL and hints fill in automatically —
+     then paste your credential and optionally set a default model.
+   - For an Anthropic subscription token, run `claude setup-token` on a machine
+     where you're logged into Claude, then paste the result.
+   - **Save**, make sure it's the **active** provider, and hit **Test** —
+     Anthropic runs a real web search; other providers run a real tool-call
+     round-trip, so you also learn whether your chosen model handles tools
+     reliably before wiring it into automations.
+   - Tick **Enable AI for scripts** and save the settings.
 2. **Install the SDK** into the Environment your script uses:
    Environments → *(your env)* → Packages → add `claude-agent-sdk`.
    (The Claude Code CLI itself ships with the PyRunner Docker image.)
@@ -122,6 +134,12 @@ Available tools: `WebSearch`, `WebFetch`, `Read`, `Glob`, `Grep`. File-writing
 and shell tools (`Write`, `Edit`, `Bash`) are **off by default** for safety —
 scripts run with full access to the PyRunner host, so only enable those if you
 fully trust the prompt.
+
+Scripts always use the **active provider**. Two provider-specific caveats:
+`WebSearch`/`WebFetch` are Anthropic server-side tools and don't exist on other
+providers, and agentic tool-calling quality varies by model — the per-provider
+**Test** button checks exactly that, and frontier-class or GLM-4.7+ models are
+recommended for tool-heavy scripts and Py AI.
 
 **A note on token counts:** an agentic call carries the agent's tool definitions
 as context, sent once and **prompt-cached** — that's the large "cache tokens"

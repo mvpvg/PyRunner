@@ -19,8 +19,8 @@
 
             {% if not claude_configured %}
             <div class="rounded-2xl border border-warn/30 bg-warn/10 p-5 text-sm">
-                <p class="font-medium text-warn">Claude isn't configured</p>
-                <p class="text-muted mt-1">Py AI uses your Claude integration. Set it up under <a href="{% url 'cpanel:services' %}" class="text-info hover:underline">Services → Claude AI</a> first.</p>
+                <p class="font-medium text-warn">No AI provider is configured</p>
+                <p class="text-muted mt-1">Py AI uses your active AI provider. Set it up under <a href="{% url 'cpanel:services' %}" class="text-info hover:underline">Services → AI Provider</a> first.</p>
             </div>
             {% elif not pyai_enabled %}
             <div class="rounded-2xl border border-info/30 bg-info/10 p-5 text-sm">

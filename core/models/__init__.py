@@ -18,6 +18,7 @@ from .tag import Tag
 from .datastore import DataStore, DataStoreEntry
 from .api_token import DataStoreAPIToken
 from .claude_usage import ClaudeUsage
+from .ai_provider import AIProvider, PROVIDER_PRESETS
 from .plugin import Plugin
 from .channel import Channel, ChannelMember, ChannelMessage
 
@@ -42,6 +43,8 @@ __all__ = [
     "DataStoreEntry",
     "DataStoreAPIToken",
     "ClaudeUsage",
+    "AIProvider",
+    "PROVIDER_PRESETS",
     "Plugin",
     "Channel",
     "ChannelMember",

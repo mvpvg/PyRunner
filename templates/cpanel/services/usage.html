@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% load humanize %}
 
-{% block title %}Claude Usage - PyRunner{% endblock %}
+{% block title %}AI Usage - PyRunner{% endblock %}
 
 {% block content %}
 <div class="flex">
@@ -16,10 +16,10 @@
                     <nav class="flex items-center gap-1.5 eyebrow text-faint mb-3">
                         <a href="{% url 'cpanel:services' %}" class="hover:text-text transition-colors">Services</a>
                         <span>/</span>
-                        <span class="text-muted">Claude usage</span>
+                        <span class="text-muted">AI usage</span>
                     </nav>
-                    <h1 class="text-[22px] font-semibold tracking-tight">Claude AI usage</h1>
-                    <p class="text-sm text-muted mt-1">Token usage across script runs and connection tests &middot; {{ period_label }}</p>
+                    <h1 class="text-[22px] font-semibold tracking-tight">AI usage</h1>
+                    <p class="text-sm text-muted mt-1">Token usage across script runs, Py AI, and connection tests &middot; {{ period_label }}</p>
                 </div>
 
                 <!-- Period selector -->
@@ -37,7 +37,7 @@
                     <svg class="w-7 h-7 text-accent" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>
                 </div>
                 <h3 class="text-base font-semibold mb-1">No usage yet for this period</h3>
-                <p class="text-sm text-muted max-w-md mx-auto">Usage is recorded automatically each time a script calls Claude through <span class="font-mono text-text">pyrunner_ai</span>, or when you run a connection test.</p>
+                <p class="text-sm text-muted max-w-md mx-auto">Usage is recorded automatically each time a script calls AI through <span class="font-mono text-text">pyrunner_ai</span>, when Py AI answers, or when you run a connection test.</p>
             </section>
             {% else %}
 
@@ -95,7 +95,7 @@
                         <tbody>
                             {% for m in by_model %}
                             <tr class="border-t border-line-soft">
-                                <td class="px-6 py-2.5 text-text font-mono text-xs">{{ m.model }}</td>
+                                <td class="px-6 py-2.5 text-text font-mono text-xs">{{ m.model }}{% if m.provider and m.provider != 'anthropic' %} <span class="ml-1 px-1.5 py-0.5 rounded bg-panel-hi text-faint">{{ m.provider }}</span>{% endif %}</td>
                                 <td class="px-6 py-2.5 text-right font-mono tnum text-muted">{{ m.requests|intcomma }}</td>
                                 <td class="px-6 py-2.5 text-right font-mono tnum text-text">{{ m.total|intcomma }}</td>
                             </tr>
@@ -143,11 +143,12 @@
                     <h2 class="text-sm font-semibold text-text">Recent calls</h2>
                 </div>
                 <div class="overflow-x-auto">
-                    <table class="w-full text-sm min-w-[760px]">
+                    <table class="w-full text-sm min-w-[840px]">
                         <thead>
                             <tr class="text-left">
                                 <th class="eyebrow text-faint font-normal px-6 py-2">Time</th>
                                 <th class="eyebrow text-faint font-normal px-6 py-2">Source</th>
+                                <th class="eyebrow text-faint font-normal px-6 py-2">Provider</th>
                                 <th class="eyebrow text-faint font-normal px-6 py-2">Model</th>
                                 <th class="eyebrow text-faint font-normal px-6 py-2 text-right">Input</th>
                                 <th class="eyebrow text-faint font-normal px-6 py-2 text-right">Output</th>
@@ -169,6 +170,7 @@
                                     <span class="text-muted">script</span>
                                     {% endif %}
                                 </td>
+                                <td class="px-6 py-2.5 text-muted text-xs">{{ row.provider|default:"—" }}</td>
                                 <td class="px-6 py-2.5 text-text font-mono text-xs">{{ row.model|default:"—" }}</td>
                                 <td class="px-6 py-2.5 text-right font-mono tnum text-muted">{{ row.input_tokens|intcomma }}</td>
                                 <td class="px-6 py-2.5 text-right font-mono tnum text-muted">{{ row.output_tokens|intcomma }}</td>

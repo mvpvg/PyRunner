@@ -126,7 +126,7 @@
                 </div>
             </div>
 
-            <!-- Claude AI Service Card -->
+            <!-- AI Provider Service Card -->
             <div class="rounded-2xl border border-line bg-panel overflow-hidden">
                 <div class="p-6 border-b border-line-soft">
                     <div class="flex items-center justify-between gap-4">
@@ -135,8 +135,8 @@
                                 <svg class="w-6 h-6 text-accent" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/></svg>
                             </div>
                             <div class="min-w-0">
-                                <h2 class="text-lg font-semibold text-text">Claude AI</h2>
-                                <p class="text-sm text-muted">Use Claude in your scripts (web search, fetch &amp; more) via your subscription or API key</p>
+                                <h2 class="text-lg font-semibold text-text">AI Provider</h2>
+                                <p class="text-sm text-muted">Use AI in your scripts and Py AI &mdash; Anthropic Claude, Z.AI GLM, OpenRouter, Ollama, or any compatible endpoint</p>
                             </div>
                         </div>
 
@@ -155,11 +155,11 @@
                         </div>
                     </div>
 
-                    {% if claude_status.configured %}
+                    {% if claude_status.provider %}
                     <div class="mt-4 flex flex-wrap gap-2.5">
                         <div class="flex items-center gap-2 px-3 py-1.5 bg-panel-hi border border-line-soft rounded-lg">
-                            <span class="eyebrow text-faint">Auth</span>
-                            <span class="text-text text-sm">{{ claude_status.auth_method_label }}</span>
+                            <span class="eyebrow text-faint">Provider</span>
+                            <span class="text-text text-sm">{{ claude_status.provider_name }} <span class="text-faint">&middot; {{ claude_status.provider_type_label }}</span></span>
                         </div>
                         <div class="flex items-center gap-2 px-3 py-1.5 bg-panel-hi border border-line-soft rounded-lg">
                             <span class="eyebrow text-faint">Model</span>
@@ -180,64 +180,161 @@
 
                     {% if not claude_status.cli_available %}
                     <div class="mt-4 p-3 rounded-lg bg-warn/10 border border-warn/30 text-warn text-sm">
-                        The Claude Code CLI was not found on the server. It ships with the current PyRunner Docker image &mdash; rebuild/pull the latest image to enable Claude.
+                        The Claude Code CLI was not found on the server. It ships with the current PyRunner Docker image &mdash; rebuild/pull the latest image to enable AI.
                     </div>
                     {% endif %}
                 </div>
 
                 <div id="claude-config" class="hidden">
-                    <form method="post" action="{% url 'cpanel:claude_settings' %}" class="p-6">
-                        {% csrf_token %}
+                    <div class="p-6 space-y-6">
 
-                        <div class="mb-5">
-                            <label class="block text-[13px] font-medium text-text mb-1.5">{{ claude_form.claude_auth_method.label }}</label>
-                            {{ claude_form.claude_auth_method }}
+                        <!-- Saved providers -->
+                        <div>
+                            <div class="flex items-center justify-between gap-3 mb-3">
+                                <p class="text-[13px] font-medium text-text">Saved providers</p>
+                                <button type="button" onclick="aiNewProvider()" class="text-[13px] px-3.5 py-2 rounded-lg border border-line text-muted hover:text-text hover:border-faint transition-colors">+ Add provider</button>
+                            </div>
+
+                            {% if ai_providers %}
+                            <div class="border border-line-soft rounded-lg overflow-hidden">
+                                <div class="overflow-x-auto">
+                                <table class="w-full text-sm min-w-[640px]">
+                                    <thead>
+                                        <tr class="text-left bg-panel-hi/40">
+                                            <th class="eyebrow text-faint font-normal px-4 py-2">Name</th>
+                                            <th class="eyebrow text-faint font-normal px-4 py-2">Type</th>
+                                            <th class="eyebrow text-faint font-normal px-4 py-2">Model</th>
+                                            <th class="eyebrow text-faint font-normal px-4 py-2">Last tested</th>
+                                            <th class="eyebrow text-faint font-normal px-4 py-2 text-right">Actions</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {% for p in ai_providers %}
+                                        <tr class="border-t border-line-soft">
+                                            <td class="px-4 py-2.5 text-text font-medium whitespace-nowrap">
+                                                {{ p.name }}
+                                                {% if settings.active_ai_provider_id == p.id %}
+                                                <span class="ml-1.5 inline-flex items-center gap-1 px-2 py-0.5 text-[11px] rounded-md bg-ok/10 text-ok align-middle"><span class="w-1 h-1 rounded-full bg-ok"></span>Active</span>
+                                                {% endif %}
+                                            </td>
+                                            <td class="px-4 py-2.5 text-muted whitespace-nowrap">{{ p.get_provider_type_display }}</td>
+                                            <td class="px-4 py-2.5 font-mono text-xs text-muted">{{ p.default_model|default:"—" }}</td>
+                                            <td class="px-4 py-2.5 text-muted whitespace-nowrap">{% if p.last_tested_at %}{{ p.last_tested_at|timesince }} ago{% else %}&mdash;{% endif %}</td>
+                                            <td class="px-4 py-2.5">
+                                                <div class="flex items-center justify-end gap-1.5 whitespace-nowrap">
+                                                    {% if settings.active_ai_provider_id != p.id %}
+                                                    <form method="post" action="{% url 'cpanel:ai_provider_activate' provider_id=p.id %}" class="inline">
+                                                        {% csrf_token %}
+                                                        <button type="submit" class="text-xs px-2.5 py-1.5 rounded-lg border border-line text-muted hover:text-text hover:border-faint transition-colors">Set active</button>
+                                                    </form>
+                                                    {% endif %}
+                                                    <button type="button" onclick="aiTestRow('{{ p.id }}', this)" class="text-xs px-2.5 py-1.5 rounded-lg border border-line text-muted hover:text-text hover:border-faint transition-colors">Test</button>
+                                                    <button type="button" onclick="aiEditProvider('{{ p.id }}')" class="text-xs px-2.5 py-1.5 rounded-lg border border-line text-muted hover:text-text hover:border-faint transition-colors">Edit</button>
+                                                    <form method="post" action="{% url 'cpanel:ai_provider_delete' provider_id=p.id %}" class="inline" onsubmit="return confirm('Delete provider \'{{ p.name|escapejs }}\'? Its saved credential will be removed.');">
+                                                        {% csrf_token %}
+                                                        <button type="submit" class="text-xs px-2.5 py-1.5 rounded-lg border border-line text-fail/80 hover:text-fail hover:border-fail/50 transition-colors">Delete</button>
+                                                    </form>
+                                                </div>
+                                            </td>
+                                        </tr>
+                                        {% endfor %}
+                                    </tbody>
+                                </table>
+                                </div>
+                            </div>
+                            {% else %}
+                            <div class="border border-dashed border-line rounded-lg p-5 text-center text-sm text-muted">
+                                No providers saved yet. Add one to connect Anthropic Claude, Z.AI GLM, OpenRouter, or a local Ollama.
+                            </div>
+                            {% endif %}
                         </div>
 
-                        <div id="claude-subscription-field" class="mb-5">
-                            <label class="block text-[13px] font-medium text-text mb-1.5">{{ claude_form.claude_oauth_token.label }}</label>
-                            {{ claude_form.claude_oauth_token }}
-                            <p class="mt-1.5 text-xs text-faint">{{ claude_form.claude_oauth_token.help_text }}</p>
-                            {% if settings.claude_oauth_token_encrypted %}<p class="mt-1.5 text-xs text-ok">A subscription token is saved.</p>{% endif %}
+                        <!-- Add / edit provider form -->
+                        <div id="ai-provider-form-wrap" class="hidden border border-line-soft rounded-lg p-5 bg-panel-hi/30">
+                            <p id="ai-provider-form-title" class="text-[13px] font-medium text-text mb-4">Add provider</p>
+                            <form method="post" action="{% url 'cpanel:ai_provider_save' %}" id="ai-provider-form">
+                                {% csrf_token %}
+                                <input type="hidden" name="provider_id" id="ai-provider-id" value="">
+
+                                <div class="grid grid-cols-1 md:grid-cols-2 gap-5 mb-5">
+                                    <div>
+                                        <label class="block text-[13px] font-medium text-text mb-1.5">{{ ai_provider_form.provider_type.label }}</label>
+                                        {{ ai_provider_form.provider_type }}
+                                    </div>
+                                    <div>
+                                        <label class="block text-[13px] font-medium text-text mb-1.5">{{ ai_provider_form.name.label }}</label>
+                                        {{ ai_provider_form.name }}
+                                    </div>
+
+                                    <div id="ai-field-base-url" class="md:col-span-2">
+                                        <label class="block text-[13px] font-medium text-text mb-1.5">{{ ai_provider_form.base_url.label }}</label>
+                                        {{ ai_provider_form.base_url }}
+                                        <p class="mt-1.5 text-xs text-faint">{{ ai_provider_form.base_url.help_text }}</p>
+                                    </div>
+
+                                    <div id="ai-field-auth-method">
+                                        <label class="block text-[13px] font-medium text-text mb-1.5">{{ ai_provider_form.auth_method.label }}</label>
+                                        {{ ai_provider_form.auth_method }}
+                                        <p class="mt-1.5 text-xs text-faint">{{ ai_provider_form.auth_method.help_text }}</p>
+                                    </div>
+
+                                    <div>
+                                        <label class="block text-[13px] font-medium text-text mb-1.5" id="ai-credential-label">{{ ai_provider_form.credential.label }}</label>
+                                        {{ ai_provider_form.credential }}
+                                        <p class="mt-1.5 text-xs text-faint" id="ai-credential-help"></p>
+                                        <p class="mt-1.5 text-xs text-ok hidden" id="ai-credential-saved">A credential is saved &mdash; leave blank to keep it.</p>
+                                    </div>
+
+                                    <div>
+                                        <label class="block text-[13px] font-medium text-text mb-1.5">{{ ai_provider_form.default_model.label }}</label>
+                                        {{ ai_provider_form.default_model }}
+                                        <p class="mt-1.5 text-xs text-faint">{{ ai_provider_form.default_model.help_text }}</p>
+                                    </div>
+                                </div>
+
+                                <p id="ai-provider-notes" class="hidden mb-5 p-3 rounded-lg bg-info/10 border border-info/30 text-info text-xs"></p>
+
+                                <div class="flex items-center gap-2.5">
+                                    <button type="submit" class="text-[13px] font-medium px-3.5 py-2 rounded-lg bg-ok text-ink hover:opacity-90 transition">Save provider</button>
+                                    <button type="button" onclick="aiTestForm()" id="ai-test-form-btn" class="text-[13px] px-3.5 py-2 rounded-lg border border-line text-muted hover:text-text hover:border-faint transition-colors">Test connection</button>
+                                    <button type="button" onclick="aiCancelProviderForm()" class="text-[13px] px-3.5 py-2 rounded-lg text-muted hover:text-text transition-colors">Cancel</button>
+                                </div>
+                            </form>
                         </div>
 
-                        <div id="claude-apikey-field" class="mb-5">
-                            <label class="block text-[13px] font-medium text-text mb-1.5">{{ claude_form.claude_api_key.label }}</label>
-                            {{ claude_form.claude_api_key }}
-                            <p class="mt-1.5 text-xs text-faint">{{ claude_form.claude_api_key.help_text }}</p>
-                            {% if settings.claude_api_key_encrypted %}<p class="mt-1.5 text-xs text-ok">An API key is saved.</p>{% endif %}
-                        </div>
+                        <!-- Master settings -->
+                        <form method="post" action="{% url 'cpanel:claude_settings' %}" class="flex flex-wrap items-end gap-5 p-4 bg-panel-hi/40 border border-line-soft rounded-lg">
+                            {% csrf_token %}
+                            <div class="min-w-[220px]">
+                                <label class="block text-[13px] font-medium text-text mb-1.5">{{ claude_form.active_provider.label }}</label>
+                                {{ claude_form.active_provider }}
+                                <p class="mt-1.5 text-xs text-faint">{{ claude_form.active_provider.help_text }}</p>
+                            </div>
+                            <label class="flex items-center gap-2 cursor-pointer pb-2.5">{{ claude_form.claude_enabled }}<span class="text-sm text-muted">{{ claude_form.claude_enabled.label }}</span></label>
+                            <button type="submit" class="text-[13px] font-medium px-3.5 py-2 rounded-lg bg-ok text-ink hover:opacity-90 transition mb-1">Save settings</button>
+                        </form>
 
-                        <div class="mb-5">
-                            <label class="block text-[13px] font-medium text-text mb-1.5">{{ claude_form.claude_default_model.label }}</label>
-                            {{ claude_form.claude_default_model }}
-                            <p class="mt-1.5 text-xs text-faint">{{ claude_form.claude_default_model.help_text }}</p>
-                        </div>
-
-                        <div class="flex flex-wrap gap-6 mb-5 p-4 bg-panel-hi/40 border border-line-soft rounded-lg">
-                            <label class="flex items-center gap-2 cursor-pointer">{{ claude_form.claude_enabled }}<span class="text-sm text-muted">{{ claude_form.claude_enabled.label }}</span></label>
-                        </div>
-
-                        <div class="mb-5 p-4 bg-panel-hi/40 border border-line-soft rounded-lg text-sm text-muted">
+                        <!-- Usage help -->
+                        <div class="p-4 bg-panel-hi/40 border border-line-soft rounded-lg text-sm text-muted">
                             <p class="text-text font-medium mb-2">How to use in a script</p>
                             <p class="mb-2">Install <span class="font-mono text-text">claude-agent-sdk</span> in the script's Environment, then:</p>
                             <pre class="bg-ink border border-line-soft rounded-lg p-3 overflow-x-auto text-text"><code>from pyrunner_ai import ask_claude
 
 answer = ask_claude("Search the web for today's AI news and summarize it")
 print(answer)</code></pre>
-                            <p class="mt-3">For a subscription token, run <span class="font-mono text-text">claude setup-token</span> on your own machine (logged into Claude). Paste the authorization code from the browser back into that terminal, then copy the token it prints (starts with <span class="font-mono text-text">sk-ant-oat01-</span>) into the field above &mdash; not the browser code itself.</p>
+                            <p class="mt-3">Scripts always use the <span class="text-text">active provider</span>. Web search/fetch tools are available on Anthropic only; other providers still support your own tools and plain prompts.</p>
+                            <p class="mt-3">For an Anthropic subscription token, run <span class="font-mono text-text">claude setup-token</span> on your own machine (logged into Claude) and paste the token it prints (starts with <span class="font-mono text-text">sk-ant-oat01-</span>) &mdash; not the browser authorization code.</p>
                             <p class="mt-3"><a href="{% url 'cpanel:script_create' %}?template=ai" class="text-info hover:underline transition">Create an example AI script &rarr;</a></p>
                         </div>
 
-                        <div class="flex items-center gap-2.5">
-                            <button type="submit" class="text-[13px] font-medium px-3.5 py-2 rounded-lg bg-ok text-ink hover:opacity-90 transition">Save settings</button>
-                            <button type="button" onclick="testClaudeConnection()" id="test-claude-btn" class="text-[13px] px-3.5 py-2 rounded-lg border border-line text-muted hover:text-text hover:border-faint transition-colors">Test connection</button>
-                        </div>
-                    </form>
+                    </div>
 
                     <div id="claude-test-result" class="hidden mx-6 mb-6 p-4 rounded-lg"></div>
                 </div>
             </div>
+
+            {{ ai_providers_json|json_script:"ai-providers-data" }}
+            {{ ai_presets_json|json_script:"ai-presets-data" }}
 
             <!-- Future services placeholder -->
             <div class="rounded-2xl border border-dashed border-line bg-panel/50 p-8 text-center">
@@ -356,39 +453,102 @@ function setPreset(provider) {
     }
 }
 
-// ---- Claude AI card ----
+// ---- AI Provider card ----
+const AI_PROVIDERS = JSON.parse(document.getElementById('ai-providers-data').textContent);
+const AI_PRESETS = JSON.parse(document.getElementById('ai-presets-data').textContent);
+
 function toggleClaudeConfig() {
     document.getElementById('claude-config').classList.toggle('hidden');
     document.getElementById('claude-chevron').classList.toggle('rotate-180');
 }
 
-function toggleClaudeAuthFields() {
-    const method = document.querySelector('[name="claude_auth_method"]').value;
-    const sub = document.getElementById('claude-subscription-field');
-    const api = document.getElementById('claude-apikey-field');
-    if (method === 'api_key') {
-        sub.classList.add('hidden');
-        api.classList.remove('hidden');
+function aiFormField(name) {
+    return document.querySelector('#ai-provider-form [name="' + name + '"]');
+}
+
+// Apply per-type hints: base_url visibility/prefill, auth method (Anthropic
+// only), credential label/help, model placeholder, preset notes.
+function aiApplyTypeHints(prefillBaseUrl) {
+    const type = aiFormField('provider_type').value;
+    const preset = AI_PRESETS[type] || {};
+
+    const baseWrap = document.getElementById('ai-field-base-url');
+    const baseInput = aiFormField('base_url');
+    if (type === 'anthropic') {
+        baseWrap.classList.add('hidden');
+        baseInput.value = '';
     } else {
-        sub.classList.remove('hidden');
-        api.classList.add('hidden');
+        baseWrap.classList.remove('hidden');
+        if (prefillBaseUrl) baseInput.value = preset.base_url || '';
+    }
+
+    document.getElementById('ai-field-auth-method').classList.toggle('hidden', type !== 'anthropic');
+    document.getElementById('ai-credential-label').textContent = preset.credential_label || 'Credential';
+    document.getElementById('ai-credential-help').textContent = preset.credential_help || '';
+    aiFormField('default_model').placeholder = preset.model_placeholder || 'optional';
+
+    const notes = document.getElementById('ai-provider-notes');
+    if (preset.notes) {
+        notes.textContent = preset.notes;
+        notes.classList.remove('hidden');
+    } else {
+        notes.classList.add('hidden');
     }
 }
 
-function testClaudeConnection() {
-    const btn = document.getElementById('test-claude-btn');
+function aiShowProviderForm() {
+    document.getElementById('ai-provider-form-wrap').classList.remove('hidden');
+}
+
+function aiCancelProviderForm() {
+    document.getElementById('ai-provider-form-wrap').classList.add('hidden');
+}
+
+function aiNewProvider() {
+    document.getElementById('ai-provider-form-title').textContent = 'Add provider';
+    document.getElementById('ai-provider-id').value = '';
+    aiFormField('name').value = '';
+    aiFormField('credential').value = '';
+    aiFormField('default_model').value = '';
+    document.getElementById('ai-credential-saved').classList.add('hidden');
+    aiApplyTypeHints(true);
+    aiShowProviderForm();
+    aiFormField('name').focus();
+}
+
+function aiEditProvider(id) {
+    const p = AI_PROVIDERS.find(x => x.id === id);
+    if (!p) return;
+    document.getElementById('ai-provider-form-title').textContent = 'Edit provider — ' + p.name;
+    document.getElementById('ai-provider-id').value = p.id;
+    aiFormField('provider_type').value = p.provider_type;
+    aiFormField('name').value = p.name;
+    aiFormField('auth_method').value = p.auth_method;
+    aiFormField('credential').value = '';
+    aiFormField('default_model').value = p.default_model;
+    aiApplyTypeHints(false);
+    aiFormField('base_url').value = p.base_url;
+    document.getElementById('ai-credential-saved').classList.toggle('hidden', !p.has_credential);
+    aiShowProviderForm();
+}
+
+function aiRenderTestResult(data) {
     const resultDiv = document.getElementById('claude-test-result');
+    resultDiv.classList.remove('hidden');
+    if (data.success) {
+        resultDiv.className = 'mx-6 mb-6 p-4 rounded-lg bg-ok/10 border border-ok/30 text-ok';
+        resultDiv.innerHTML = '<div class="flex items-start"><svg class="w-5 h-5 mr-2 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg><span>' + escapeHtml(data.message) + '</span></div>';
+    } else {
+        resultDiv.className = 'mx-6 mb-6 p-4 rounded-lg bg-fail/10 border border-fail/30 text-fail';
+        resultDiv.innerHTML = '<div class="flex items-start"><svg class="w-5 h-5 mr-2 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg><span>' + escapeHtml(data.error) + '</span></div>';
+    }
+}
 
+function aiPostTest(payload, btn, busyText) {
+    const original = btn.textContent;
     btn.disabled = true;
-    btn.textContent = 'Testing (web search)...';
-    resultDiv.classList.add('hidden');
-
-    const payload = {
-        claude_auth_method: document.querySelector('[name="claude_auth_method"]').value,
-        claude_oauth_token: document.querySelector('[name="claude_oauth_token"]').value,
-        claude_api_key: document.querySelector('[name="claude_api_key"]').value,
-        claude_default_model: document.querySelector('[name="claude_default_model"]').value,
-    };
+    btn.textContent = busyText;
+    document.getElementById('claude-test-result').classList.add('hidden');
 
     fetch('{% url "cpanel:claude_test_connection" %}', {
         method: 'POST',
@@ -399,25 +559,31 @@ function testClaudeConnection() {
         body: JSON.stringify(payload),
     })
     .then(response => response.json())
-    .then(data => {
-        resultDiv.classList.remove('hidden');
-        if (data.success) {
-            resultDiv.className = 'mx-6 mb-6 p-4 rounded-lg bg-ok/10 border border-ok/30 text-ok';
-            resultDiv.innerHTML = '<div class="flex items-start"><svg class="w-5 h-5 mr-2 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg><span>' + escapeHtml(data.message) + '</span></div>';
-        } else {
-            resultDiv.className = 'mx-6 mb-6 p-4 rounded-lg bg-fail/10 border border-fail/30 text-fail';
-            resultDiv.innerHTML = '<div class="flex items-start"><svg class="w-5 h-5 mr-2 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg><span>' + escapeHtml(data.error) + '</span></div>';
-        }
-    })
+    .then(aiRenderTestResult)
     .catch(error => {
-        resultDiv.classList.remove('hidden');
-        resultDiv.className = 'mx-6 mb-6 p-4 rounded-lg bg-fail/10 border border-fail/30 text-fail';
-        resultDiv.textContent = 'Error: ' + escapeHtml(error.message);
+        aiRenderTestResult({success: false, error: error.message});
     })
     .finally(() => {
         btn.disabled = false;
-        btn.textContent = 'Test connection';
+        btn.textContent = original;
     });
+}
+
+function aiTestRow(id, btn) {
+    aiPostTest({provider_id: id}, btn, 'Testing…');
+}
+
+function aiTestForm() {
+    const payload = {
+        provider_type: aiFormField('provider_type').value,
+        credential: aiFormField('credential').value,
+        auth_method: aiFormField('auth_method').value,
+        base_url: aiFormField('base_url').value,
+        default_model: aiFormField('default_model').value,
+    };
+    const editingId = document.getElementById('ai-provider-id').value;
+    if (editingId) payload.provider_id = editingId;  // blank credential -> saved one
+    aiPostTest(payload, document.getElementById('ai-test-form-btn'), 'Testing…');
 }
 
 // Auto-expand if form has errors or if not configured
@@ -426,14 +592,14 @@ document.addEventListener('DOMContentLoaded', function() {
     toggleS3Config();
     {% endif %}
 
-    // Claude: wire auth-method toggle and set initial field visibility
-    const claudeAuth = document.querySelector('[name="claude_auth_method"]');
-    if (claudeAuth) {
-        claudeAuth.addEventListener('change', toggleClaudeAuthFields);
-        toggleClaudeAuthFields();
+    const aiType = aiFormField('provider_type');
+    if (aiType) {
+        aiType.addEventListener('change', function () { aiApplyTypeHints(true); });
     }
-    {% if claude_form.errors %}
+    {% if not ai_providers %}
+    // First run: open the card and the add-provider form.
     toggleClaudeConfig();
+    aiNewProvider();
     {% endif %}
 });
 </script>

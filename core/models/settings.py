@@ -315,42 +315,24 @@ class GlobalSettings(models.Model):
         help_text="Size of last backup in bytes",
     )
 
-    # Claude AI Integration
-    class ClaudeAuthMethod(models.TextChoices):
-        SUBSCRIPTION = "subscription", "Claude subscription (OAuth token)"
-        API_KEY = "api_key", "Anthropic API key"
-
+    # AI Integration — provider profiles live in AIProvider (all keys saved);
+    # this FK selects which one scripts, Py AI, and tests use. `claude_enabled`
+    # keeps its historical column name but is the master AI on/off switch.
     claude_enabled = models.BooleanField(
         default=False,
-        help_text="Make Claude AI available to scripts (via the pyrunner_ai helper)",
+        help_text="Make AI available to scripts (via the pyrunner_ai helper)",
     )
-    claude_auth_method = models.CharField(
-        max_length=20,
-        choices=ClaudeAuthMethod.choices,
-        default=ClaudeAuthMethod.SUBSCRIPTION,
-        help_text="Authenticate with a Claude subscription token or an Anthropic API key",
-    )
-    claude_oauth_token_encrypted = models.TextField(
-        blank=True,
-        help_text="Claude Code OAuth token from `claude setup-token` (encrypted)",
-    )
-    claude_api_key_encrypted = models.TextField(
-        blank=True,
-        help_text="Anthropic API key (encrypted)",
-    )
-    claude_default_model = models.CharField(
-        max_length=100,
-        blank=True,
-        help_text="Optional default model id (e.g. claude-sonnet-4-6). Blank = account default.",
-    )
-    claude_last_tested_at = models.DateTimeField(
+    active_ai_provider = models.ForeignKey(
+        "core.AIProvider",
         null=True,
         blank=True,
-        help_text="When the Claude connection was last successfully tested",
+        on_delete=models.SET_NULL,
+        related_name="+",
+        help_text="Provider profile used by scripts, Py AI, and connection tests",
     )
 
-    # Py AI — built-in read-only assistant (standalone feature; uses the Claude
-    # credential above). Beta: introspection-only.
+    # Py AI — built-in read-only assistant (standalone feature; uses the active
+    # AI provider above). Beta: introspection-only.
     pyai_enabled = models.BooleanField(
         default=False,
         help_text="Enable the Py AI assistant (requires Claude to be configured).",
@@ -358,7 +340,8 @@ class GlobalSettings(models.Model):
     pyai_model = models.CharField(
         max_length=100,
         blank=True,
-        help_text="Optional model id for Py AI. Blank = the Claude default model.",
+        help_text="Optional model id for Py AI (must match the active provider). "
+        "Blank = the active provider's default model.",
     )
     pyai_system_prompt = models.TextField(
         blank=True,

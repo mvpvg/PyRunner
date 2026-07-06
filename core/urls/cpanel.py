@@ -133,6 +133,9 @@ from core.views.services import (
     claude_settings_view,
     claude_test_connection_view,
     claude_usage_view,
+    ai_provider_save_view,
+    ai_provider_delete_view,
+    ai_provider_activate_view,
 )
 from core.views.plugins import (
     plugin_list_view,
@@ -315,6 +318,9 @@ urlpatterns = [
     path("services/claude/", claude_settings_view, name="claude_settings"),
     path("services/claude/test/", claude_test_connection_view, name="claude_test_connection"),
     path("services/claude/usage/", claude_usage_view, name="claude_usage"),
+    path("services/ai/providers/save/", ai_provider_save_view, name="ai_provider_save"),
+    path("services/ai/providers/<uuid:provider_id>/delete/", ai_provider_delete_view, name="ai_provider_delete"),
+    path("services/ai/providers/<uuid:provider_id>/activate/", ai_provider_activate_view, name="ai_provider_activate"),
 
     # Plugins (superuser)
     path("plugins/", plugin_list_view, name="plugin_list"),

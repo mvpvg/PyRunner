@@ -31,6 +31,11 @@ class ClaudeUsage(models.Model):
 
     model = models.CharField(max_length=100, blank=True)
 
+    # Which AIProvider type served the call (e.g. "anthropic", "zai"). Nullable
+    # by design: rows are also inserted by raw SQL / the loopback API from
+    # script subprocesses, which may predate this column.
+    provider = models.CharField(max_length=20, null=True, blank=True, default="")
+
     # Token counts (from the Anthropic usage block; input_tokens excludes cache).
     input_tokens = models.PositiveIntegerField(default=0)
     output_tokens = models.PositiveIntegerField(default=0)

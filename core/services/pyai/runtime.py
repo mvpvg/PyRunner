@@ -101,13 +101,14 @@ class PyAIService:
         if not s.pyai_enabled:
             raise PyAIError("Py AI is not enabled.")
         if not (s.claude_enabled and ClaudeService.is_configured()):
-            raise PyAIError("Claude is not configured. Set it up under Services → Claude AI.")
+            raise PyAIError("AI is not configured. Set it up under Services → AI Provider.")
 
         env = ClaudeService.get_script_env()
         if not env:
-            raise PyAIError("Claude credentials are unavailable.")
+            raise PyAIError("AI provider credentials are unavailable.")
 
-        model = s.pyai_model or s.claude_default_model or ""
+        provider = s.active_ai_provider
+        model = s.pyai_model or (provider.default_model if provider else "") or ""
         env = dict(env)
         if model:
             env.pop("ANTHROPIC_MODEL", None)  # explicit model kwarg wins
@@ -199,8 +200,10 @@ class PyAIService:
         try:
             from core.models import ClaudeUsage
 
+            provider = ClaudeService.get_active_provider()
             ClaudeUsage.objects.create(
                 source=ClaudeUsage.Source.PYAI,
+                provider=provider.provider_type if provider else "",
                 model=result.model or "",
                 input_tokens=result.input_tokens,
                 output_tokens=result.output_tokens,

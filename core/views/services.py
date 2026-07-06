@@ -16,8 +16,8 @@ from django.utils import timezone
 from django.views.decorators.http import require_POST
 from django.http import HttpRequest, HttpResponse, JsonResponse
 
-from core.models import GlobalSettings, ClaudeUsage
-from core.forms import S3SettingsForm, ClaudeSettingsForm
+from core.models import AIProvider, GlobalSettings, ClaudeUsage, PROVIDER_PRESETS
+from core.forms import S3SettingsForm, AISettingsForm, AIProviderForm
 from core.services.s3_service import S3Service
 from core.services.claude_service import ClaudeService
 from core.services.encryption_service import EncryptionService
@@ -37,8 +37,24 @@ def services_view(request: HttpRequest) -> HttpResponse:
     settings = GlobalSettings.get_settings()
     s3_form = S3SettingsForm(instance=settings)
     s3_status = S3Service.get_status()
-    claude_form = ClaudeSettingsForm(instance=settings)
+    claude_form = AISettingsForm(instance=settings)
     claude_status = ClaudeService.get_status()
+
+    providers = list(AIProvider.objects.all())
+    # Plain-dict mirror for the template JS (edit prefill, per-type hints).
+    providers_data = [
+        {
+            "id": str(p.id),
+            "name": p.name,
+            "provider_type": p.provider_type,
+            "base_url": p.base_url,
+            "auth_method": p.auth_method,
+            "default_model": p.default_model,
+            "has_credential": bool(p.credential_encrypted),
+        }
+        for p in providers
+    ]
+    presets_data = {str(key): value for key, value in PROVIDER_PRESETS.items()}
 
     return render(
         request,
@@ -49,6 +65,10 @@ def services_view(request: HttpRequest) -> HttpResponse:
             "s3_status": s3_status,
             "claude_form": claude_form,
             "claude_status": claude_status,
+            "ai_providers": providers,
+            "ai_provider_form": AIProviderForm(),
+            "ai_providers_json": providers_data,
+            "ai_presets_json": presets_data,
         },
     )
 
@@ -140,13 +160,13 @@ def s3_test_connection_view(request: HttpRequest) -> JsonResponse:
 @superuser_required
 @require_POST
 def claude_settings_view(request: HttpRequest) -> HttpResponse:
-    """Update Claude AI integration settings."""
+    """Update AI integration settings (master toggle + active provider)."""
     settings = GlobalSettings.get_settings()
-    form = ClaudeSettingsForm(request.POST, instance=settings)
+    form = AISettingsForm(request.POST, instance=settings)
 
     if form.is_valid():
         form.save(settings)
-        messages.success(request, "Claude AI settings saved successfully.")
+        messages.success(request, "AI settings saved successfully.")
     else:
         for field, errors in form.errors.items():
             for error in errors:
@@ -158,11 +178,87 @@ def claude_settings_view(request: HttpRequest) -> HttpResponse:
 @login_required
 @superuser_required
 @require_POST
-def claude_test_connection_view(request: HttpRequest) -> JsonResponse:
-    """Test the Claude connection (runs a canned web-search query).
+def ai_provider_save_view(request: HttpRequest) -> HttpResponse:
+    """Create or update an AIProvider profile (hidden provider_id = edit)."""
+    instance = None
+    provider_id = request.POST.get("provider_id")
+    if provider_id:
+        instance = AIProvider.objects.filter(pk=provider_id).first()
+        if instance is None:
+            messages.error(request, "Provider not found.")
+            return redirect("cpanel:services")
 
-    Accepts credentials in the POST body to test before saving; falls back to
-    saved settings when no new credential is provided.
+    form = AIProviderForm(request.POST, instance=instance)
+    if form.is_valid():
+        provider = form.save()
+        # Convenience: the first provider ever saved becomes active.
+        settings = GlobalSettings.get_settings()
+        if settings.active_ai_provider_id is None and AIProvider.objects.count() == 1:
+            settings.active_ai_provider = provider
+            settings.save(update_fields=["active_ai_provider"])
+        messages.success(request, f"Provider '{provider.name}' saved.")
+    else:
+        for field, errors in form.errors.items():
+            for error in errors:
+                messages.error(request, f"{field}: {error}")
+
+    return redirect("cpanel:services")
+
+
+@login_required
+@superuser_required
+@require_POST
+def ai_provider_delete_view(request: HttpRequest, provider_id) -> HttpResponse:
+    """Delete a provider profile (active FK falls back to none via SET_NULL)."""
+    provider = AIProvider.objects.filter(pk=provider_id).first()
+    if provider is None:
+        messages.error(request, "Provider not found.")
+        return redirect("cpanel:services")
+
+    was_active = (
+        GlobalSettings.get_settings().active_ai_provider_id == provider.id
+    )
+    name = provider.name
+    provider.delete()
+    if was_active:
+        messages.warning(
+            request,
+            f"Provider '{name}' deleted. No provider is active now — AI is "
+            "effectively off until you activate another one.",
+        )
+    else:
+        messages.success(request, f"Provider '{name}' deleted.")
+    return redirect("cpanel:services")
+
+
+@login_required
+@superuser_required
+@require_POST
+def ai_provider_activate_view(request: HttpRequest, provider_id) -> HttpResponse:
+    """Make one saved provider the active one (one-click switch)."""
+    provider = AIProvider.objects.filter(pk=provider_id).first()
+    if provider is None:
+        messages.error(request, "Provider not found.")
+        return redirect("cpanel:services")
+
+    settings = GlobalSettings.get_settings()
+    settings.active_ai_provider = provider
+    settings.save(update_fields=["active_ai_provider"])
+    messages.success(request, f"'{provider.name}' is now the active AI provider.")
+    return redirect("cpanel:services")
+
+
+@login_required
+@superuser_required
+@require_POST
+def claude_test_connection_view(request: HttpRequest) -> JsonResponse:
+    """Test an AI provider connection with a real SDK round-trip.
+
+    Three request shapes:
+    - {"provider_id": ...} — test a saved provider row (optional "credential"
+      override for edit-before-save);
+    - {"provider_type": ..., "credential": ..., ...} — test unsaved form values;
+    - {} — test the currently-active provider.
     """
     try:
         data = {}
@@ -175,43 +271,46 @@ def claude_test_connection_view(request: HttpRequest) -> JsonResponse:
                     status=400,
                 )
 
-        settings = GlobalSettings.get_settings()
-        auth_method = data.get("claude_auth_method") or settings.claude_auth_method
-        model = data.get("claude_default_model", settings.claude_default_model) or ""
-
-        # Pick the credential for the selected method: prefer the just-entered
-        # value, otherwise decrypt the saved one.
-        if auth_method == GlobalSettings.ClaudeAuthMethod.API_KEY:
-            credential = data.get("claude_api_key", "")
-            if not credential and settings.claude_api_key_encrypted:
-                credential = EncryptionService.decrypt(settings.claude_api_key_encrypted)
-        else:
-            credential = data.get("claude_oauth_token", "")
-            if not credential and settings.claude_oauth_token_encrypted:
-                credential = EncryptionService.decrypt(
-                    settings.claude_oauth_token_encrypted
+        provider_id = data.get("provider_id")
+        if provider_id:
+            provider = AIProvider.objects.filter(pk=provider_id).first()
+            if provider is None:
+                return JsonResponse({"success": False, "error": "Provider not found."})
+            overrides = {"provider_type", "base_url", "default_model", "auth_method"}
+            if overrides & set(data):
+                # Edit-form test: unsaved field values, saved credential fallback.
+                credential = data.get("credential", "")
+                if not credential and provider.credential_encrypted:
+                    credential = EncryptionService.decrypt(provider.credential_encrypted)
+                ptype = data.get("provider_type") or provider.provider_type
+                preset = PROVIDER_PRESETS.get(ptype, {})
+                success, message = ClaudeService.test_connection_with_credentials(
+                    ptype,
+                    credential,
+                    auth_method=data.get("auth_method") or provider.auth_method,
+                    base_url=data.get("base_url")
+                    or provider.base_url
+                    or preset.get("base_url", ""),
+                    model=data.get("default_model", provider.default_model),
+                    extra_env=preset.get("extra_env"),
                 )
-
-        if not credential:
-            return JsonResponse(
-                {
-                    "success": False,
-                    "error": "No credential to test. Enter a token/key first.",
-                }
+            else:
+                success, message = ClaudeService.test_provider(
+                    provider, credential_override=data.get("credential", "")
+                )
+        elif data.get("provider_type"):
+            ptype = data["provider_type"]
+            preset = PROVIDER_PRESETS.get(ptype, {})
+            success, message = ClaudeService.test_connection_with_credentials(
+                ptype,
+                data.get("credential", ""),
+                auth_method=data.get("auth_method") or AIProvider.AuthMethod.API_KEY,
+                base_url=data.get("base_url") or preset.get("base_url", ""),
+                model=data.get("default_model", ""),
+                extra_env=preset.get("extra_env"),
             )
-
-        success, message = ClaudeService.test_connection_with_credentials(
-            auth_method=auth_method,
-            credential=credential,
-            model=model,
-        )
-
-        # Record a successful test against saved settings.
-        if success:
-            from django.utils import timezone
-
-            settings.claude_last_tested_at = timezone.now()
-            settings.save(update_fields=["claude_last_tested_at"])
+        else:
+            success, message = ClaudeService.test_saved_connection()
 
         return JsonResponse(
             {
@@ -221,7 +320,7 @@ def claude_test_connection_view(request: HttpRequest) -> JsonResponse:
             }
         )
     except Exception as e:
-        logger.exception("Claude connection test failed")
+        logger.exception("AI provider connection test failed")
         return JsonResponse({"success": False, "error": str(e)})
 
 
@@ -282,15 +381,16 @@ def claude_usage_view(request: HttpRequest) -> HttpResponse:
         "requests": [d["requests"] or 0 for d in daily],
     }
 
-    # Per-model breakdown
+    # Per-model breakdown (split by serving provider)
     by_model = []
     for row in (
-        base.values("model")
+        base.values("provider", "model")
         .annotate(requests=Count("id"), input=Sum("input_tokens"), output=Sum("output_tokens"))
         .order_by("-input")
     ):
         by_model.append(
             {
+                "provider": row["provider"] or "",
                 "model": row["model"] or "(unknown)",
                 "requests": row["requests"],
                 "input": row["input"] or 0,
