@@ -24,6 +24,7 @@ from django.urls import path, include
 from django.shortcuts import redirect
 
 from core.views.webhooks import webhook_trigger_view
+from core.views.channel_webhooks import channel_webhook_view
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +65,8 @@ urlpatterns = [
     path("internal/", include("core.urls.internal")),
     # Public webhook endpoint (no auth required)
     path("webhook/<str:token>/", webhook_trigger_view, name="webhook_trigger"),
+    # Public inbound chat webhook for Channels (signature-verified, no auth).
+    path("channels/<str:token>/", channel_webhook_view, name="channel_webhook"),
     path("", lambda request: redirect("auth:login")),
 ]
 

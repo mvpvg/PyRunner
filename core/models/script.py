@@ -164,6 +164,14 @@ class Script(models.Model):
         default=False,
         help_text="Enable webhook notifications for this script",
     )
+    # Chat-channel notifications (Channels subsystem). Run summaries are delivered
+    # to each enabled channel here, gated by ``notify_on`` like email/webhook.
+    notify_channels = models.ManyToManyField(
+        "core.Channel",
+        blank=True,
+        related_name="notify_scripts",
+        help_text="Chat channels to notify when this script runs (respects notify_on).",
+    )
 
     # Retention overrides (null = use global settings)
     retention_days_override = models.PositiveIntegerField(

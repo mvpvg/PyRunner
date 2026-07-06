@@ -111,6 +111,8 @@ class NotificationService:
             "email_error": None,
             "webhook_sent": False,
             "webhook_error": None,
+            "channels_sent": 0,
+            "channel_errors": [],
         }
 
         if not cls.should_notify(run):
@@ -137,7 +139,56 @@ class NotificationService:
                 logger.error(f"Failed to send webhook notification for run {run.id}: {e}")
                 results["webhook_error"] = str(e)
 
+        # Send chat-channel notifications (Channels subsystem)
+        channel_outcome = cls._send_channel_notifications(run)
+        results["channels_sent"] = channel_outcome["sent"]
+        results["channel_errors"] = channel_outcome["errors"]
+
         return results
+
+    @classmethod
+    def _send_channel_notifications(cls, run: "Run") -> dict:
+        """Deliver a run summary to each enabled chat channel on the script."""
+        sent = 0
+        errors = []
+        channels = list(run.script.notify_channels.filter(enabled=True))
+        if not channels:
+            return {"sent": 0, "errors": errors}
+
+        from core.services import ChannelService
+
+        text = cls._build_channel_text(run)
+        for channel in channels:
+            try:
+                ChannelService.send(channel, text)
+                sent += 1
+                logger.info(f"Channel notification sent for run {run.id} via {channel.name}")
+            except Exception as e:
+                logger.error(
+                    f"Failed to send channel notification for run {run.id} "
+                    f"via {channel.name}: {e}"
+                )
+                errors.append({"channel": channel.name, "error": str(e)})
+        return {"sent": sent, "errors": errors}
+
+    @classmethod
+    def _build_channel_text(cls, run: "Run") -> str:
+        """Build a short plain-text run summary for chat channels."""
+        emoji = "✅" if run.status == "success" else "❌"
+        lines = [f"{emoji} {run.script.name} — {run.status.upper()}"]
+
+        if run.duration:
+            secs = run.duration
+            if secs < 60:
+                lines.append(f"Duration: {secs:.1f}s")
+            else:
+                lines.append(f"Duration: {int(secs // 60)}m {int(secs % 60)}s")
+
+        if run.status in ("failed", "timeout") and run.stderr:
+            excerpt = run.stderr.strip()[:300]
+            lines.append(f"\n{excerpt}")
+
+        return "\n".join(lines)
 
     @classmethod
     def _should_send_email(cls, run: "Run") -> bool:
@@ -313,6 +364,43 @@ class NotificationService:
             },
             "error": run.stderr[:1000] if run.stderr and run.status in ["failed", "timeout"] else None,
         }
+
+    @classmethod
+    def send_email(cls, subject: str, body: str, to: str | None = None, html: str | None = None) -> bool:
+        """Send a one-off email through the configured core email backend.
+
+        This is the delegate behind ``pyrunner_notify.email()`` — Channels do not
+        re-implement email; they reuse PyRunner core's single email config. Falls
+        back to ``default_notification_email`` when ``to`` is omitted.
+        """
+        from core.models import GlobalSettings
+
+        settings = GlobalSettings.get_settings()
+        backend = cls._get_email_backend(settings)
+        if not backend:
+            raise ValueError("Email backend not configured or disabled")
+
+        if settings.email_backend == GlobalSettings.EmailBackend.SMTP:
+            from_email = settings.smtp_from_email
+        else:
+            from_email = settings.resend_from_email
+
+        recipient = to or settings.default_notification_email
+        if not recipient or not from_email:
+            raise ValueError("Missing email configuration (recipient or from address)")
+
+        email = EmailMultiAlternatives(
+            subject=subject,
+            body=body,
+            from_email=from_email,
+            to=[recipient],
+            connection=backend,
+        )
+        if html:
+            email.attach_alternative(html, "text/html")
+        email.send()
+        logger.info(f"Email sent to {recipient} via channels send API")
+        return True
 
     @classmethod
     def send_test_email(cls, recipient_email: str) -> bool:

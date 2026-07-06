@@ -94,6 +94,7 @@ class ScriptForm(forms.ModelForm):
             "notify_email",
             "notify_webhook_url",
             "notify_webhook_enabled",
+            "notify_channels",
         ]
         widgets = {
             "name": forms.TextInput(
@@ -135,6 +136,7 @@ class ScriptForm(forms.ModelForm):
                 }
             ),
             "notify_webhook_enabled": forms.CheckboxInput(attrs={"class": CHECK_CLASS}),
+            "notify_channels": forms.CheckboxSelectMultiple(attrs={"class": CHECK_CLASS}),
         }
         labels = {
             "name": "Script Name",
@@ -150,6 +152,7 @@ class ScriptForm(forms.ModelForm):
             "notify_email": "Notification Email",
             "notify_webhook_url": "Webhook URL",
             "notify_webhook_enabled": "Enable Webhook",
+            "notify_channels": "Notify channels",
         }
         help_texts = {
             "timeout_seconds": "Maximum execution time (1 second to 24 hours)",
@@ -159,13 +162,23 @@ class ScriptForm(forms.ModelForm):
             "notify_webhook_url": "URL to POST notifications to when script completes",
         }
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, workspace=None, **kwargs):
         super().__init__(*args, **kwargs)
         # Only show active environments
         self.fields["environment"].queryset = Environment.objects.filter(is_active=True)
         # Optional: a form submitted without it (or legacy callers) defaults to
         # 'all' in clean_injection_mode, matching the model default.
         self.fields["injection_mode"].required = False
+        # Scope the notify-channels picker to the active workspace (tenancy);
+        # None ⇒ empty so a channel never leaks across workspaces in the picker.
+        from core.models import Channel
+
+        self.fields["notify_channels"].required = False
+        self.fields["notify_channels"].queryset = (
+            Channel.objects.for_workspace(workspace)
+            if workspace is not None
+            else Channel.objects.none()
+        )
 
     def clean_injection_mode(self):
         return self.cleaned_data.get("injection_mode") or Script.InjectionMode.ALL
@@ -2254,4 +2267,255 @@ class S3BackupScheduleForm(forms.Form):
         # Sync the django-q2 schedule
         BackupScheduleService.sync_schedule()
 
+        return instance
+
+
+class ChannelForm(forms.Form):
+    """Create / edit a chat Channel (Channels subsystem; Phase 1 = Telegram).
+
+    A plain Form (like S3SettingsForm) because credentials are encrypted +
+    fingerprinted on save. Provider choices are limited to *registered* providers,
+    so the picker grows automatically as providers are added.
+    """
+
+    name = forms.CharField(
+        max_length=120,
+        widget=forms.TextInput(
+            attrs={"class": CONSOLE_INPUT_CLASS, "placeholder": "Ops Alerts"}
+        ),
+        help_text="A label for this connection.",
+    )
+    provider = forms.ChoiceField(
+        choices=[],  # populated in __init__ from registered providers
+        widget=forms.Select(attrs={"class": CONSOLE_INPUT_CLASS}),
+    )
+    bot_token = forms.CharField(
+        required=False,
+        widget=forms.PasswordInput(
+            attrs={
+                "class": CONSOLE_INPUT_CLASS + " font-mono",
+                "placeholder": "Leave blank to keep current",
+                "autocomplete": "new-password",
+            }
+        ),
+        label="Bot token",
+        help_text="Telegram: the token from @BotFather (e.g. 123456:ABC-DEF...).",
+    )
+    default_target = forms.CharField(
+        required=False,
+        widget=forms.TextInput(
+            attrs={"class": CONSOLE_INPUT_CLASS + " font-mono", "placeholder": "e.g. 123456789"}
+        ),
+        label="Default chat ID",
+        help_text="Where notifications are sent. Use 'Find chat ID' after saving.",
+    )
+    enabled = forms.BooleanField(
+        required=False,
+        initial=True,
+        widget=forms.CheckboxInput(attrs={"class": CHECK_CLASS}),
+    )
+
+    def __init__(self, *args, instance=None, workspace=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.instance = instance
+        self.workspace = workspace
+
+        from core.models import Channel
+        from core.services.channels import list_providers
+
+        registered = set(list_providers())
+        self.fields["provider"].choices = [
+            (value, label)
+            for value, label in Channel.Provider.choices
+            if value in registered
+        ]
+
+        if instance is not None:
+            self.fields["name"].initial = instance.name
+            self.fields["provider"].initial = instance.provider
+            self.fields["default_target"].initial = instance.default_target
+            self.fields["enabled"].initial = instance.enabled
+            # Provider is fixed on edit — changing it would orphan the credentials.
+            self.fields["provider"].disabled = True
+
+    def clean_name(self):
+        from core.models import Channel
+
+        name = (self.cleaned_data.get("name") or "").strip()
+        qs = Channel.objects.filter(workspace=self.workspace, name=name)
+        if self.instance is not None:
+            qs = qs.exclude(pk=self.instance.pk)
+        if qs.exists():
+            raise forms.ValidationError("A channel with this name already exists.")
+        return name
+
+    def clean(self):
+        cleaned = super().clean()
+        bot_token = (cleaned.get("bot_token") or "").strip()
+
+        # Bot token is required on create, optional on edit (blank = keep current).
+        if self.instance is None and not bot_token:
+            self.add_error("bot_token", "A bot token is required.")
+            return cleaned
+
+        if bot_token:
+            from core.models import Channel
+            from core.services.channels import get_provider
+
+            provider_key = self.instance.provider if self.instance else cleaned.get("provider")
+            if provider_key:
+                identity = get_provider(provider_key).identity_for_fingerprint(
+                    {"bot_token": bot_token}
+                )
+                fingerprint = Channel.fingerprint_for(provider_key, identity)
+                if fingerprint:
+                    clash = Channel.objects.filter(creds_fingerprint=fingerprint)
+                    if self.instance is not None:
+                        clash = clash.exclude(pk=self.instance.pk)
+                    if clash.exists():
+                        self.add_error(
+                            "bot_token",
+                            "This bot is already connected as another channel "
+                            "(one bot = one channel).",
+                        )
+        return cleaned
+
+    def save(self, *, created_by=None):
+        from core.models import Channel
+        from core.services.channels import get_provider
+
+        instance = self.instance or Channel(
+            workspace=self.workspace, created_by=created_by
+        )
+        if self.instance is None:
+            instance.provider = self.cleaned_data["provider"]
+        instance.name = self.cleaned_data["name"]
+        instance.enabled = self.cleaned_data.get("enabled", False)
+
+        config = dict(instance.config or {})
+        config["default_target"] = (self.cleaned_data.get("default_target") or "").strip()
+        instance.config = config
+
+        bot_token = (self.cleaned_data.get("bot_token") or "").strip()
+        if bot_token:
+            creds = {"bot_token": bot_token}
+            identity = get_provider(instance.provider).identity_for_fingerprint(creds)
+            instance.set_credentials(creds, identity=identity)
+
+        instance.save()
+        return instance
+
+
+class ChannelInboundForm(forms.Form):
+    """Configure a channel's inbound handler + approval/cap settings (Phase 2).
+
+    Phase 2 exposes the ``script`` handler only; ``pyai`` arrives with PLAN_pyai.
+    """
+
+    inbound_enabled = forms.BooleanField(
+        required=False, widget=forms.CheckboxInput(attrs={"class": CHECK_CLASS})
+    )
+    inbound_handler = forms.ChoiceField(
+        required=False,
+        choices=[("", "Notify only (no inbound handling)"), ("script", "Run a script")],
+        widget=forms.Select(attrs={"class": CONSOLE_INPUT_CLASS}),
+        label="When a message arrives",
+    )
+    inbound_target_id = forms.ChoiceField(
+        required=False,
+        widget=forms.Select(attrs={"class": CONSOLE_INPUT_CLASS}),
+        label="Script to run",
+    )
+    inbound_access = forms.ChoiceField(
+        choices=[
+            ("approval", "Approval inbox (recommended) — only approved senders"),
+            ("open", "Open — anyone who passes signature verification"),
+        ],
+        widget=forms.Select(attrs={"class": CONSOLE_INPUT_CLASS}),
+        label="Who can use it",
+    )
+    daily_reply_cap = forms.IntegerField(
+        required=False,
+        min_value=0,
+        widget=forms.NumberInput(attrs={"class": CONSOLE_INPUT_CLASS, "min": 0}),
+        label="Daily reply cap",
+        help_text="Max handler replies per day (0 = unlimited).",
+    )
+
+    def __init__(self, *args, channel=None, workspace=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.channel = channel
+
+        from core.models import GlobalSettings, Script
+
+        # Offer Py AI as a handler only when it's enabled.
+        if GlobalSettings.get_settings().pyai_enabled:
+            self.fields["inbound_handler"].choices = self.fields["inbound_handler"].choices + [
+                ("pyai", "Ask Py AI")
+            ]
+
+        scripts = (
+            Script.objects.for_workspace(workspace)
+            .filter(archived_at__isnull=True)
+            .order_by("name")
+        )
+        self.fields["inbound_target_id"].choices = [("", "— select a script —")] + [
+            (str(s.id), s.name) for s in scripts
+        ]
+
+        if channel is not None and not self.is_bound:
+            self.fields["inbound_enabled"].initial = channel.inbound_enabled
+            self.fields["inbound_handler"].initial = channel.inbound_handler
+            self.fields["inbound_target_id"].initial = (
+                str(channel.inbound_target_id) if channel.inbound_target_id else ""
+            )
+            self.fields["inbound_access"].initial = channel.inbound_access
+            self.fields["daily_reply_cap"].initial = channel.daily_reply_cap
+
+    def clean(self):
+        cleaned = super().clean()
+        if cleaned.get("inbound_enabled") and cleaned.get("inbound_handler") == "script":
+            if not cleaned.get("inbound_target_id"):
+                self.add_error("inbound_target_id", "Choose a script to run.")
+        return cleaned
+
+
+class PyAISettingsForm(forms.Form):
+    """Configure the built-in Py AI assistant (instance-global, superuser-only)."""
+
+    pyai_enabled = forms.BooleanField(
+        required=False,
+        widget=forms.CheckboxInput(attrs={"class": CHECK_CLASS}),
+        label="Enable Py AI",
+    )
+    pyai_model = forms.CharField(
+        required=False,
+        max_length=100,
+        widget=forms.TextInput(
+            attrs={"class": CONSOLE_INPUT_CLASS, "placeholder": "claude-sonnet-4-6 (optional)"}
+        ),
+        label="Model",
+        help_text="Optional. Blank uses the Claude default model.",
+    )
+    pyai_system_prompt = forms.CharField(
+        required=False,
+        widget=forms.Textarea(
+            attrs={"class": CONSOLE_INPUT_CLASS, "rows": 3,
+                   "placeholder": "Optional extra instruction for Py AI"}
+        ),
+        label="Extra system instruction",
+    )
+
+    def __init__(self, *args, instance=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        if instance is not None and not self.is_bound:
+            self.fields["pyai_enabled"].initial = instance.pyai_enabled
+            self.fields["pyai_model"].initial = instance.pyai_model
+            self.fields["pyai_system_prompt"].initial = instance.pyai_system_prompt
+
+    def save(self, instance):
+        instance.pyai_enabled = self.cleaned_data.get("pyai_enabled", False)
+        instance.pyai_model = self.cleaned_data.get("pyai_model") or ""
+        instance.pyai_system_prompt = self.cleaned_data.get("pyai_system_prompt") or ""
+        instance.save(update_fields=["pyai_enabled", "pyai_model", "pyai_system_prompt", "updated_at"])
         return instance

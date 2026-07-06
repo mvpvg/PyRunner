@@ -1,0 +1,221 @@
+"""
+Channel management views (Channels subsystem — Phase 1: outbound chat).
+
+DB-backed CRUD (like Secrets), workspace-scoped, plus two AJAX actions on a saved
+channel: test connection and the Telegram getUpdates chat-ID helper.
+"""
+
+import json
+import logging
+
+from django.contrib import messages
+from django.contrib.auth.decorators import login_required
+from django.http import HttpRequest, HttpResponse, JsonResponse
+from django.shortcuts import get_object_or_404, redirect, render
+from django.urls import reverse
+from django.utils import timezone
+from django.views.decorators.http import require_POST
+
+from core.forms import ChannelForm, ChannelInboundForm
+from core.models import Channel, ChannelMember
+from core.services import ChannelService, ChannelServiceError, EncryptionService
+from core.services.channels import ChannelError
+
+logger = logging.getLogger(__name__)
+
+
+@login_required
+def channel_list_view(request: HttpRequest) -> HttpResponse:
+    """List configured channels in the active workspace."""
+    channels = Channel.objects.for_workspace(request.workspace).order_by("name")
+    return render(
+        request,
+        "cpanel/channels/list.html",
+        {
+            "channels": channels,
+            "encryption_configured": EncryptionService.is_configured(),
+        },
+    )
+
+
+@login_required
+def channel_create_view(request: HttpRequest) -> HttpResponse:
+    """Create a new channel."""
+    if not EncryptionService.is_configured():
+        messages.error(
+            request,
+            "Encryption is not configured. Set ENCRYPTION_KEY in your environment.",
+        )
+        return redirect("cpanel:channel_list")
+
+    if request.method == "POST":
+        form = ChannelForm(request.POST, workspace=request.workspace)
+        if form.is_valid():
+            channel = form.save(created_by=request.user)
+            messages.success(
+                request,
+                f'Channel "{channel.name}" created. Test it and set a default chat below.',
+            )
+            return redirect("cpanel:channel_edit", pk=channel.pk)
+    else:
+        form = ChannelForm(workspace=request.workspace)
+
+    return render(request, "cpanel/channels/create.html", {"form": form})
+
+
+@login_required
+def channel_edit_view(request: HttpRequest, pk) -> HttpResponse:
+    """Edit an existing channel."""
+    channel = get_object_or_404(Channel, pk=pk, workspace=request.workspace)
+
+    if request.method == "POST":
+        form = ChannelForm(request.POST, instance=channel, workspace=request.workspace)
+        if form.is_valid():
+            form.save()
+            messages.success(request, f'Channel "{channel.name}" updated.')
+            return redirect("cpanel:channel_edit", pk=channel.pk)
+    else:
+        form = ChannelForm(instance=channel, workspace=request.workspace)
+
+    provider = ChannelService.provider_for(channel)
+    webhook_url = None
+    if channel.inbound_token:
+        webhook_url = request.build_absolute_uri(
+            reverse("channel_webhook", args=[channel.inbound_token])
+        )
+
+    return render(
+        request,
+        "cpanel/channels/edit.html",
+        {
+            "form": form,
+            "channel": channel,
+            "inbound_form": ChannelInboundForm(channel=channel, workspace=request.workspace),
+            "supports_inbound": getattr(provider, "supports_inbound", False),
+            "webhook_url": webhook_url,
+            "members": channel.members.all(),
+        },
+    )
+
+
+@login_required
+@require_POST
+def channel_inbound_view(request: HttpRequest, pk) -> HttpResponse:
+    """Save inbound config and register/unregister the provider webhook."""
+    channel = get_object_or_404(Channel, pk=pk, workspace=request.workspace)
+    form = ChannelInboundForm(request.POST, channel=channel, workspace=request.workspace)
+    if not form.is_valid():
+        for field, errors in form.errors.items():
+            for error in errors:
+                messages.error(request, f"{field}: {error}")
+        return redirect("cpanel:channel_edit", pk=channel.pk)
+
+    cd = form.cleaned_data
+    channel.inbound_enabled = cd["inbound_enabled"]
+    channel.inbound_handler = cd.get("inbound_handler") or ""
+    channel.inbound_target_id = cd.get("inbound_target_id") or None
+    channel.inbound_access = cd["inbound_access"]
+    channel.daily_reply_cap = cd.get("daily_reply_cap") or 0
+
+    provider = ChannelService.provider_for(channel)
+
+    if channel.inbound_enabled:
+        channel.ensure_inbound_token()
+        channel.ensure_inbound_secret()  # persisted on the save() below
+    channel.save()
+
+    if channel.inbound_enabled and getattr(provider, "supports_inbound", False):
+        public_url = request.build_absolute_uri(
+            reverse("channel_webhook", args=[channel.inbound_token])
+        )
+        try:
+            provider.set_inbound_webhook(channel, public_url)
+            messages.success(request, "Inbound enabled and webhook registered.")
+        except Exception as e:
+            logger.warning("set_inbound_webhook failed for channel %s: %s", channel.id, e)
+            messages.error(
+                request,
+                f"Saved, but registering the webhook failed: {e} "
+                "Inbound needs a publicly reachable HTTPS instance.",
+            )
+    elif not channel.inbound_enabled and getattr(provider, "supports_inbound", False):
+        try:
+            provider.clear_inbound_webhook(channel)
+        except Exception as e:
+            logger.warning("clear_inbound_webhook failed for channel %s: %s", channel.id, e)
+        messages.success(request, "Inbound disabled.")
+    else:
+        messages.success(request, "Inbound settings saved.")
+
+    return redirect("cpanel:channel_edit", pk=channel.pk)
+
+
+@login_required
+@require_POST
+def channel_member_action_view(request: HttpRequest, pk, member_pk, action) -> HttpResponse:
+    """Approve / block / delete a channel member (the approval inbox)."""
+    channel = get_object_or_404(Channel, pk=pk, workspace=request.workspace)
+    member = get_object_or_404(ChannelMember, pk=member_pk, channel=channel)
+
+    if action == "approve":
+        member.status = ChannelMember.Status.APPROVED
+        member.approved_at = timezone.now()
+        member.added_by = request.user
+        member.save(update_fields=["status", "approved_at", "added_by"])
+        messages.success(request, f"Approved {member.display_name or member.sender_id}.")
+    elif action == "block":
+        member.status = ChannelMember.Status.BLOCKED
+        member.save(update_fields=["status"])
+        messages.success(request, f"Blocked {member.display_name or member.sender_id}.")
+    elif action == "delete":
+        member.delete()
+        messages.success(request, "Member removed.")
+    else:
+        messages.error(request, "Unknown action.")
+
+    return redirect("cpanel:channel_edit", pk=channel.pk)
+
+
+@login_required
+@require_POST
+def channel_delete_view(request: HttpRequest, pk) -> HttpResponse:
+    """Delete a channel."""
+    channel = get_object_or_404(Channel, pk=pk, workspace=request.workspace)
+    name = channel.name
+    channel.delete()
+    messages.success(request, f'Channel "{name}" deleted.')
+    return redirect("cpanel:channel_list")
+
+
+@login_required
+@require_POST
+def channel_test_view(request: HttpRequest, pk) -> JsonResponse:
+    """Test connectivity for a saved channel (AJAX)."""
+    channel = get_object_or_404(Channel, pk=pk, workspace=request.workspace)
+    try:
+        ok, message = ChannelService.test(channel)
+    except Exception as e:
+        logger.exception("Channel test failed")
+        return JsonResponse({"success": False, "error": str(e)})
+    return JsonResponse(
+        {
+            "success": ok,
+            "message": message if ok else None,
+            "error": message if not ok else None,
+        }
+    )
+
+
+@login_required
+@require_POST
+def channel_discover_chat_ids_view(request: HttpRequest, pk) -> JsonResponse:
+    """Telegram getUpdates helper: recent chats that messaged the bot (AJAX)."""
+    channel = get_object_or_404(Channel, pk=pk, workspace=request.workspace)
+    try:
+        chats = ChannelService.discover_chat_ids(channel)
+    except (ChannelError, ChannelServiceError) as e:
+        return JsonResponse({"success": False, "error": str(e)})
+    except Exception as e:
+        logger.exception("Channel chat-ID discovery failed")
+        return JsonResponse({"success": False, "error": str(e)})
+    return JsonResponse({"success": True, "chats": chats})

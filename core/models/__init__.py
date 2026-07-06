@@ -19,6 +19,7 @@ from .datastore import DataStore, DataStoreEntry
 from .api_token import DataStoreAPIToken
 from .claude_usage import ClaudeUsage
 from .plugin import Plugin
+from .channel import Channel, ChannelMember, ChannelMessage
 
 __all__ = [
     "User",
@@ -42,4 +43,7 @@ __all__ = [
     "DataStoreAPIToken",
     "ClaudeUsage",
     "Plugin",
+    "Channel",
+    "ChannelMember",
+    "ChannelMessage",
 ]

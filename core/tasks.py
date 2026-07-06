@@ -58,7 +58,11 @@ def execute_run_task(run_id: str, webhook_data: dict | None = None) -> dict:
     # Send notifications after run completion
     try:
         notification_results = NotificationService.send_notification(run)
-        if notification_results.get("email_sent") or notification_results.get("webhook_sent"):
+        if (
+            notification_results.get("email_sent")
+            or notification_results.get("webhook_sent")
+            or notification_results.get("channels_sent")
+        ):
             logger.info(f"Notifications sent for run {run_id}: {notification_results}")
     except Exception as e:
         logger.error(f"Failed to send notifications for run {run_id}: {e}")

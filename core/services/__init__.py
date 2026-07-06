@@ -14,6 +14,7 @@ from .backup_schedule_service import BackupScheduleService
 from .claude_service import ClaudeService, ClaudeServiceError
 from .recaptcha_service import RecaptchaService
 from .plugin_service import PluginService, PluginInstallError
+from .channel_service import ChannelService, ChannelServiceError
 
 __all__ = [
     "ScheduleService",
@@ -32,4 +33,6 @@ __all__ = [
     "RecaptchaService",
     "PluginService",
     "PluginInstallError",
+    "ChannelService",
+    "ChannelServiceError",
 ]

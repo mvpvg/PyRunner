@@ -154,6 +154,15 @@ def _build_script_environment(
         if "body_json" in webhook_data:
             env["WEBHOOK_BODY_JSON"] = json.dumps(webhook_data["body_json"])
 
+        # Inbound chat context (Channels Phase 2): lets the run reply via
+        # pyrunner_notify.reply() to the conversation that triggered it.
+        inbound = webhook_data.get("inbound")
+        if inbound:
+            env["INBOUND_CHANNEL"] = inbound.get("channel", "") or ""
+            env["INBOUND_TEXT"] = inbound.get("text", "") or ""
+            env["INBOUND_REPLY_REF"] = json.dumps(inbound.get("reply_ref") or {})
+            env["INBOUND_SENDER"] = json.dumps(inbound.get("sender") or {})
+
     # Add Claude AI support (Services -> Claude AI). Injects the configured
     # credential + config dir so the pyrunner_ai helper works in scripts.
     # Empty dict when Claude is disabled/unconfigured.

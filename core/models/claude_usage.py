@@ -16,6 +16,7 @@ class ClaudeUsage(models.Model):
     class Source(models.TextChoices):
         SCRIPT = "script", "Script"
         TEST = "test", "Test"
+        PYAI = "pyai", "Py AI"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)

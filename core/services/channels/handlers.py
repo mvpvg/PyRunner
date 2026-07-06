@@ -1,0 +1,112 @@
+"""
+Inbound handler registry — what an inbound message *does*.
+
+Phase 2 ships the ``script`` handler (chat → run a script). ``pyai`` is added by
+PLAN_pyai.md; ``agent`` is RESERVED for the future Agents plan. A handler takes
+``(channel, InboundMessage)`` and returns an ``OutboundMessage`` to reply
+synchronously, or ``None`` when the reply happens asynchronously — the script
+handler queues a Run that replies later via ``pyrunner_notify.reply()``.
+"""
+
+import logging
+
+from .base import OutboundMessage
+
+logger = logging.getLogger(__name__)
+
+_HANDLERS = {}
+
+
+def register_handler(key: str, fn):
+    _HANDLERS[key] = fn
+    return fn
+
+
+def get_handler(key: str):
+    return _HANDLERS.get(key)
+
+
+def _script_handler(channel, msg):
+    """Run the linked script, passing the inbound message as INBOUND_* env.
+
+    Returns None: the script replies asynchronously via ``pyrunner_notify.reply()``.
+    """
+    from core.models import Run, Script
+    from core.tasks import queue_script_run
+
+    if not channel.inbound_target_id:
+        return OutboundMessage(
+            "This bot isn't linked to a script yet.", reply_ref=msg.reply_ref
+        )
+
+    script = Script.objects.filter(
+        id=channel.inbound_target_id, workspace_id=channel.workspace_id
+    ).first()
+    if script is None or not script.can_run:
+        return OutboundMessage(
+            "The linked script is unavailable right now.", reply_ref=msg.reply_ref
+        )
+
+    run = Run.objects.create(
+        script=script,
+        workspace_id=script.workspace_id,
+        status=Run.Status.PENDING,
+        trigger_type=Run.TriggerType.API,
+        code_snapshot=script.code,
+    )
+    webhook_data = {
+        "method": "INBOUND",
+        "inbound": {
+            "channel": channel.name,
+            "reply_ref": msg.reply_ref,
+            "text": msg.text,
+            "sender": msg.sender,
+        },
+    }
+    queue_script_run(run, webhook_data=webhook_data)
+    logger.info("Inbound message routed to script %s (run %s)", script.id, run.id)
+    return None
+
+
+def _channel_history(channel, msg, limit: int = 6):
+    """Recent same-conversation turns as [{role, text}] (excludes the current msg)."""
+    from core.models import ChannelMessage
+
+    chat_id = (msg.reply_ref or {}).get("chat_id")
+    rows = list(channel.messages.order_by("-created_at")[: limit * 2 + 2])
+    # The current inbound was already logged by dispatch_inbound — drop it once.
+    for i, r in enumerate(rows):
+        if r.direction == ChannelMessage.Direction.IN and r.text == msg.text:
+            rows.pop(i)
+            break
+    history = []
+    for r in reversed(rows[: limit * 2]):
+        if chat_id is not None and (r.reply_ref_json or {}).get("chat_id") not in (chat_id, None):
+            continue
+        history.append(
+            {"role": "user" if r.direction == ChannelMessage.Direction.IN else "assistant",
+             "text": r.text}
+        )
+    return history
+
+
+def _pyai_handler(channel, msg):
+    """Answer the message with Py AI (synchronous reply, counts against the cap)."""
+    from core.services.pyai import PyAIError, PyAIService
+
+    if not PyAIService.is_available():
+        return OutboundMessage("Py AI is not available right now.", reply_ref=msg.reply_ref)
+    if not (msg.text or "").strip():
+        return OutboundMessage("Send me a question and I'll take a look.", reply_ref=msg.reply_ref)
+
+    try:
+        result = PyAIService.respond(
+            msg.text, workspace=channel.workspace, history=_channel_history(channel, msg)
+        )
+    except PyAIError as e:
+        return OutboundMessage(f"Sorry — {e}", reply_ref=msg.reply_ref)
+    return OutboundMessage(result.text or "(no answer)", reply_ref=msg.reply_ref)
+
+
+register_handler("script", _script_handler)
+register_handler("pyai", _pyai_handler)

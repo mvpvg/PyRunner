@@ -110,6 +110,22 @@ from core.views.tasks import (
     task_force_stop_view,
     task_detail_view,
 )
+from core.views.pyai import (
+    pyai_view,
+    pyai_send_view,
+    pyai_clear_view,
+    pyai_settings_view,
+)
+from core.views.channels import (
+    channel_list_view,
+    channel_create_view,
+    channel_edit_view,
+    channel_delete_view,
+    channel_test_view,
+    channel_discover_chat_ids_view,
+    channel_inbound_view,
+    channel_member_action_view,
+)
 from core.views.services import (
     services_view,
     s3_settings_view,
@@ -204,6 +220,22 @@ urlpatterns = [
     path("api/secret-picker/", secret_picker_view, name="secret_picker"),
     path("secrets/<uuid:pk>/edit/", secret_edit_view, name="secret_edit"),
     path("secrets/<uuid:pk>/delete/", secret_delete_view, name="secret_delete"),
+
+    # Channels
+    path("channels/", channel_list_view, name="channel_list"),
+    path("channels/create/", channel_create_view, name="channel_create"),
+    path("channels/<uuid:pk>/edit/", channel_edit_view, name="channel_edit"),
+    path("channels/<uuid:pk>/delete/", channel_delete_view, name="channel_delete"),
+    path("channels/<uuid:pk>/test/", channel_test_view, name="channel_test"),
+    path("channels/<uuid:pk>/discover/", channel_discover_chat_ids_view, name="channel_discover"),
+    path("channels/<uuid:pk>/inbound/", channel_inbound_view, name="channel_inbound"),
+    path("channels/<uuid:pk>/members/<uuid:member_pk>/<str:action>/", channel_member_action_view, name="channel_member_action"),
+
+    # Py AI
+    path("pyai/", pyai_view, name="pyai"),
+    path("pyai/send/", pyai_send_view, name="pyai_send"),
+    path("pyai/clear/", pyai_clear_view, name="pyai_clear"),
+    path("pyai/settings/", pyai_settings_view, name="pyai_settings"),
 
     # Tags
     path("tags/", tag_list_view, name="tag_list"),

@@ -266,6 +266,23 @@
                     {% if form.notify_webhook_url.errors %}<p class="mt-1.5 text-xs text-fail">{{ form.notify_webhook_url.errors.0 }}</p>{% endif %}
                 </div>
             </div>
+            <div>
+                <label class="block text-[13px] font-medium text-text mb-1.5">{{ form.notify_channels.label }}</label>
+                {% if form.notify_channels.field.queryset %}
+                <div class="space-y-2">
+                    {% for checkbox in form.notify_channels %}
+                    <label class="flex items-center gap-2.5 cursor-pointer">
+                        {{ checkbox.tag }}
+                        <span class="text-sm text-text">{{ checkbox.choice_label }}</span>
+                    </label>
+                    {% endfor %}
+                </div>
+                <p class="mt-1.5 text-xs text-faint">Chat channels to notify (respects "Notify On" above).</p>
+                {% else %}
+                <p class="text-xs text-faint">No chat channels yet. <a href="{% url 'cpanel:channel_list' %}" class="text-info hover:underline">Add one</a> to send run notifications to Telegram.</p>
+                {% endif %}
+                {% if form.notify_channels.errors %}<p class="mt-1.5 text-xs text-fail">{{ form.notify_channels.errors.0 }}</p>{% endif %}
+            </div>
         </div>
     </section>
 </div>

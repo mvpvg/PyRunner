@@ -2,12 +2,12 @@
 Context processors for PyRunner templates.
 """
 
-from pyrunner.version import __version__
+from pyrunner.version import __version__, IS_BETA
 
 
 def pyrunner_version(request):
     """Add PyRunner version and update-availability info to template context."""
-    context = {"pyrunner_version": __version__}
+    context = {"pyrunner_version": __version__, "pyrunner_is_beta": IS_BETA}
 
     # Whether a newer release is available (computed by the daily update check).
     # Wrapped defensively so a DB hiccup never breaks page rendering.

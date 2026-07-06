@@ -349,6 +349,22 @@ class GlobalSettings(models.Model):
         help_text="When the Claude connection was last successfully tested",
     )
 
+    # Py AI — built-in read-only assistant (standalone feature; uses the Claude
+    # credential above). Beta: introspection-only.
+    pyai_enabled = models.BooleanField(
+        default=False,
+        help_text="Enable the Py AI assistant (requires Claude to be configured).",
+    )
+    pyai_model = models.CharField(
+        max_length=100,
+        blank=True,
+        help_text="Optional model id for Py AI. Blank = the Claude default model.",
+    )
+    pyai_system_prompt = models.TextField(
+        blank=True,
+        help_text="Optional extra system instruction appended to Py AI's prompt.",
+    )
+
     # Update check (compares running version against the latest GitHub release tag)
     update_latest_version = models.CharField(
         max_length=50,
@@ -460,6 +476,20 @@ class GlobalSettings(models.Model):
         if not self.worker_settings_updated_at or not self.worker_heartbeat_at:
             return False
         return self.worker_settings_updated_at > self.worker_heartbeat_at
+
+    def worker_is_alive(self, threshold_seconds: int = 180) -> bool:
+        """Whether a django-q worker has heartbeat-ed recently.
+
+        Used by the inbound webhook to fast-fail with a friendly "asleep" reply
+        instead of silently enqueuing a message no worker will ever process.
+        The heartbeat task runs every minute; the default 3-minute window means
+        only a genuinely-down worker trips it.
+        """
+        from django.utils import timezone
+
+        if not self.worker_heartbeat_at:
+            return False
+        return (timezone.now() - self.worker_heartbeat_at).total_seconds() < threshold_seconds
 
     def recaptcha_active(self) -> bool:
         """True when reCAPTCHA is enabled and both keys are configured."""

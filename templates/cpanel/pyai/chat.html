@@ -1,0 +1,158 @@
+{% extends "base.html" %}
+
+{% block title %}Py AI - PyRunner{% endblock %}
+
+{% block content %}
+<div class="flex">
+    {% include "cpanel/_sidebar.html" %}
+
+    <div class="flex-1 min-w-0">
+        <div class="px-5 lg:px-8 py-7 max-w-3xl mx-auto space-y-5">
+
+            <div class="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                    <h1 class="text-[22px] font-semibold tracking-tight">Py AI</h1>
+                    <p class="text-sm text-muted mt-1">A read-only assistant that answers questions about this PyRunner instance.</p>
+                </div>
+                <button id="pyai-clear" type="button" class="text-[13px] px-3 py-1.5 rounded-lg border border-line text-muted hover:text-text hover:border-faint transition-colors">Clear chat</button>
+            </div>
+
+            {% if not claude_configured %}
+            <div class="rounded-2xl border border-warn/30 bg-warn/10 p-5 text-sm">
+                <p class="font-medium text-warn">Claude isn't configured</p>
+                <p class="text-muted mt-1">Py AI uses your Claude integration. Set it up under <a href="{% url 'cpanel:services' %}" class="text-info hover:underline">Services → Claude AI</a> first.</p>
+            </div>
+            {% elif not pyai_enabled %}
+            <div class="rounded-2xl border border-info/30 bg-info/10 p-5 text-sm">
+                <p class="font-medium text-info">Py AI is turned off</p>
+                <p class="text-muted mt-1">{% if is_superuser %}Enable it below to start chatting.{% else %}Ask an administrator to enable it.{% endif %}</p>
+            </div>
+            {% endif %}
+
+            <!-- Chat -->
+            <section class="rounded-2xl border border-line bg-panel flex flex-col" style="height: 60vh; min-height: 420px;">
+                <div id="pyai-transcript" class="flex-1 overflow-y-auto scrollbar-thin p-5 space-y-4">
+                    {% for turn in history %}
+                        {% if turn.role == 'user' %}
+                        <div class="flex justify-end"><div class="max-w-[80%] rounded-2xl rounded-br-sm bg-ok/15 text-text px-4 py-2.5 text-sm whitespace-pre-wrap">{{ turn.text }}</div></div>
+                        {% else %}
+                        <div class="flex justify-start"><div class="max-w-[80%] rounded-2xl rounded-bl-sm bg-panel-hi text-text px-4 py-2.5 text-sm whitespace-pre-wrap">{{ turn.text }}</div></div>
+                        {% endif %}
+                    {% empty %}
+                    <div class="h-full grid place-items-center text-center">
+                        <div>
+                            <p class="text-sm text-muted">Ask me about your instance.</p>
+                            <p class="text-xs text-faint mt-2">"How many scripts do I have?" · "Did anything fail recently?" · "What's in the results datastore?"</p>
+                        </div>
+                    </div>
+                    {% endfor %}
+                </div>
+                <form id="pyai-form" class="border-t border-line-soft p-3 flex items-end gap-2">
+                    <textarea id="pyai-input" rows="1" placeholder="Ask Py AI…" {% if not available %}disabled{% endif %}
+                        class="flex-1 resize-none px-3.5 py-2.5 bg-ink border border-line rounded-lg text-text text-sm placeholder-faint/60 focus:outline-none focus:ring-2 focus:ring-ok/30 focus:border-ok/60 transition-colors"></textarea>
+                    <button type="submit" {% if not available %}disabled{% endif %}
+                        class="text-[13px] font-medium px-4 py-2.5 rounded-lg bg-ok text-ink hover:opacity-90 transition disabled:opacity-40 disabled:cursor-not-allowed">Send</button>
+                </form>
+            </section>
+
+            <p class="text-xs text-faint">Py AI can read scripts, runs, schedules, and datastores in this workspace. It can't run, edit, or delete anything, and never sees your secrets.</p>
+
+            {% if is_superuser and settings_form %}
+            <div class="rounded-2xl border border-line bg-panel p-6">
+                <h2 class="text-base font-semibold mb-1">Settings</h2>
+                <p class="text-sm text-muted mb-4">Instance-wide Py AI configuration.</p>
+                <form method="post" action="{% url 'cpanel:pyai_settings' %}" class="space-y-4">
+                    {% csrf_token %}
+                    <label class="flex items-center gap-2.5 cursor-pointer">
+                        {{ settings_form.pyai_enabled }}
+                        <span class="text-sm text-text">{{ settings_form.pyai_enabled.label }}</span>
+                    </label>
+                    <div>
+                        <label class="block text-[13px] font-medium text-text mb-1.5">{{ settings_form.pyai_model.label }}</label>
+                        {{ settings_form.pyai_model }}
+                        <p class="mt-1.5 text-xs text-faint">{{ settings_form.pyai_model.help_text }}</p>
+                    </div>
+                    <div>
+                        <label class="block text-[13px] font-medium text-text mb-1.5">{{ settings_form.pyai_system_prompt.label }}</label>
+                        {{ settings_form.pyai_system_prompt }}
+                    </div>
+                    <div class="flex justify-end pt-2 border-t border-line-soft">
+                        <button type="submit" class="text-[13px] font-medium px-3.5 py-2 rounded-lg bg-ok text-ink hover:opacity-90 transition">Save settings</button>
+                    </div>
+                </form>
+            </div>
+            {% endif %}
+
+        </div>
+    </div>
+</div>
+
+<script>
+(function () {
+    const csrf = "{{ csrf_token }}";
+    const sendUrl = "{% url 'cpanel:pyai_send' %}";
+    const clearUrl = "{% url 'cpanel:pyai_clear' %}";
+    const transcript = document.getElementById("pyai-transcript");
+    const form = document.getElementById("pyai-form");
+    const input = document.getElementById("pyai-input");
+
+    function scrollDown() { transcript.scrollTop = transcript.scrollHeight; }
+
+    function bubble(role, text) {
+        const wrap = document.createElement("div");
+        wrap.className = "flex " + (role === "user" ? "justify-end" : "justify-start");
+        const b = document.createElement("div");
+        b.className = "max-w-[80%] rounded-2xl px-4 py-2.5 text-sm whitespace-pre-wrap " +
+            (role === "user" ? "rounded-br-sm bg-ok/15 text-text" : "rounded-bl-sm bg-panel-hi text-text");
+        b.textContent = text;
+        wrap.appendChild(b);
+        transcript.appendChild(wrap);
+        scrollDown();
+        return b;
+    }
+
+    if (form) {
+        // Auto-grow the textarea.
+        input.addEventListener("input", function () {
+            input.style.height = "auto";
+            input.style.height = Math.min(input.scrollHeight, 160) + "px";
+        });
+        input.addEventListener("keydown", function (e) {
+            if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); form.requestSubmit(); }
+        });
+
+        form.addEventListener("submit", function (e) {
+            e.preventDefault();
+            const message = input.value.trim();
+            if (!message) return;
+            // clear the empty-state placeholder on first message
+            if (transcript.querySelector(".grid")) transcript.innerHTML = "";
+            bubble("user", message);
+            input.value = ""; input.style.height = "auto";
+            input.disabled = true;
+            const thinking = bubble("assistant", "Py AI is thinking…");
+            thinking.classList.add("text-faint");
+
+            fetch(sendUrl, {
+                method: "POST",
+                headers: { "X-CSRFToken": csrf, "Content-Type": "application/json" },
+                body: JSON.stringify({ message: message }),
+            }).then(r => r.json().then(d => ({ ok: r.ok, d })))
+              .then(({ ok, d }) => {
+                  thinking.classList.remove("text-faint");
+                  if (!ok) { thinking.textContent = d.error || "Something went wrong."; thinking.classList.add("text-fail"); }
+                  else { thinking.textContent = d.text || "(no answer)"; }
+                  scrollDown();
+              })
+              .catch(err => { thinking.textContent = "Request failed: " + err; thinking.classList.add("text-fail"); })
+              .finally(() => { input.disabled = false; input.focus(); });
+        });
+    }
+
+    document.getElementById("pyai-clear").addEventListener("click", function () {
+        fetch(clearUrl, { method: "POST", headers: { "X-CSRFToken": csrf } })
+            .then(() => { transcript.innerHTML = '<div class="h-full grid place-items-center text-center"><div><p class="text-sm text-muted">Chat cleared.</p></div></div>'; });
+    });
+})();
+</script>
+{% endblock %}

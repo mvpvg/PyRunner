@@ -1,0 +1,147 @@
+"""
+Public inbound webhook for Channels (Phase 2).
+
+Mounted at /channels/<token>/ (no auth — external chat services POST here). The
+flow is deliberately front-loaded into the web process so we can fast-ack:
+
+  IP rate-limit → resolve channel → verify signature → dedup → parse →
+  per-sender rate-limit → approval inbox → worker-heartbeat preflight → enqueue → 200
+
+All real handler work happens in the django-q worker (dispatch_inbound). Requires
+a publicly reachable HTTPS instance — inbound does not work on localhost.
+"""
+
+import json
+import logging
+
+from django.core.cache import cache
+from django.http import HttpRequest, JsonResponse
+from django.utils import timezone
+from django.views.decorators.csrf import csrf_exempt
+from django.views.decorators.http import require_http_methods
+from django_q.tasks import async_task
+
+from core.models import Channel, ChannelMember, GlobalSettings
+from core.services.channels import ChannelError, OutboundMessage, get_provider
+
+logger = logging.getLogger(__name__)
+
+_IP_RATE_LIMIT = 60       # per IP per window
+_SENDER_RATE_LIMIT = 20   # per (channel, sender) per window
+_RATE_WINDOW = 60         # seconds
+_DEDUP_TTL = 300
+_REPLY_THROTTLE_TTL = 300
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def channel_webhook_view(request: HttpRequest, token: str) -> JsonResponse:
+    # Coarse per-IP rate limit (cheap abuse brake before any work).
+    ip = request.META.get("REMOTE_ADDR", "unknown")
+    ip_key = f"channel_ip_rate_{ip}"
+    if cache.get(ip_key, 0) >= _IP_RATE_LIMIT:
+        return JsonResponse({"error": "rate limited"}, status=429)
+    cache.set(ip_key, cache.get(ip_key, 0) + 1, _RATE_WINDOW)
+
+    channel = Channel.objects.filter(
+        inbound_token=token, enabled=True, inbound_enabled=True
+    ).first()
+    if channel is None:
+        return JsonResponse({"error": "not found"}, status=404)
+
+    provider = get_provider(channel.provider)
+
+    # Signature verification is the real authenticity gate.
+    if not provider.verify_inbound(channel, request):
+        logger.warning("Inbound signature rejected for channel %s", channel.id)
+        return JsonResponse({"error": "unauthorized"}, status=401)
+
+    try:
+        payload = json.loads(request.body or b"{}")
+    except (ValueError, TypeError):
+        return JsonResponse({"error": "bad request"}, status=400)
+    if not isinstance(payload, dict):
+        return JsonResponse({"error": "bad request"}, status=400)
+
+    # Drop retried/duplicate deliveries (providers retry on slow acks).
+    dedup = provider.dedup_id(payload)
+    if dedup:
+        dkey = f"channel_dedup_{channel.id}_{dedup}"
+        if cache.get(dkey):
+            return JsonResponse({"status": "duplicate"})
+        cache.set(dkey, 1, _DEDUP_TTL)
+
+    msg = provider.parse_inbound(channel, payload)
+    if msg is None:
+        return JsonResponse({"status": "ignored"})
+    sender_id = msg.sender.get("id")
+
+    # Per-sender rate limit (applies even to unapproved senders).
+    s_key = f"channel_sender_rate_{channel.id}_{sender_id}"
+    if cache.get(s_key, 0) >= _SENDER_RATE_LIMIT:
+        return JsonResponse({"status": "rate_limited"})
+    cache.set(s_key, cache.get(s_key, 0) + 1, _RATE_WINDOW)
+
+    channel.last_inbound_at = timezone.now()
+    channel.save(update_fields=["last_inbound_at", "updated_at"])
+
+    # Approval inbox — deny by default. The owner approves from the dashboard.
+    if channel.inbound_access == Channel.InboundAccess.APPROVAL:
+        decision = _approval_gate(channel, provider, msg, sender_id)
+        if decision is not None:
+            return decision  # not approved → short-circuit
+
+    # Worker-down preflight: a friendly reply beats a silent black hole.
+    if not GlobalSettings.get_settings().worker_is_alive():
+        _safe_send(channel, provider, msg, "💤 I'm asleep right now — please try again shortly.")
+        return JsonResponse({"status": "worker_unavailable"})
+
+    async_task(
+        "core.services.channels.inbound.dispatch_inbound",
+        str(channel.id),
+        payload,
+        task_name=f"inbound-{channel.id}",
+    )
+    return JsonResponse({"status": "queued"})
+
+
+def _approval_gate(channel, provider, msg, sender_id):
+    """Return a JsonResponse to short-circuit, or None if the sender is approved."""
+    member = ChannelMember.objects.filter(channel=channel, sender_id=sender_id).first()
+    if member is None:
+        ChannelMember.objects.create(
+            channel=channel,
+            sender_id=sender_id,
+            display_name=msg.sender.get("display_name", "") or "",
+            status=ChannelMember.Status.PENDING,
+            last_seen_at=timezone.now(),
+        )
+        _reply_once(
+            channel, provider, msg, sender_id,
+            "👋 You're not approved to use this bot yet. Ask the owner to grant you access.",
+        )
+        return JsonResponse({"status": "pending"})
+
+    ChannelMember.objects.filter(pk=member.pk).update(last_seen_at=timezone.now())
+    if member.status == ChannelMember.Status.BLOCKED:
+        return JsonResponse({"status": "blocked"})
+    if member.status == ChannelMember.Status.PENDING:
+        _reply_once(channel, provider, msg, sender_id, "Still pending approval — hang tight.")
+        return JsonResponse({"status": "pending"})
+    return None  # approved
+
+
+def _reply_once(channel, provider, msg, sender_id, text):
+    """Reply at most once per sender per window (no amplification)."""
+    key = f"channel_notapproved_{channel.id}_{sender_id}"
+    if cache.get(key):
+        return
+    cache.set(key, 1, _REPLY_THROTTLE_TTL)
+    _safe_send(channel, provider, msg, text)
+
+
+def _safe_send(channel, provider, msg, text):
+    try:
+        provider.send(channel, OutboundMessage(text=text, reply_ref=msg.reply_ref))
+    except ChannelError as e:
+        logger.warning("Inbound auto-reply failed on channel %s: %s", channel.id, e)

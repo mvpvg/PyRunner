@@ -152,7 +152,7 @@ def script_list_view(request: HttpRequest) -> HttpResponse:
 def script_create_view(request: HttpRequest) -> HttpResponse:
     """Create a new script."""
     if request.method == "POST":
-        form = ScriptForm(request.POST)
+        form = ScriptForm(request.POST, workspace=request.workspace)
         if form.is_valid():
             script = form.save(commit=False)
             script.created_by = request.user
@@ -169,7 +169,11 @@ def script_create_view(request: HttpRequest) -> HttpResponse:
     else:
         # Optionally pre-fill from a starter template (e.g. ?template=ai).
         template = SCRIPT_TEMPLATES.get(request.GET.get("template", ""))
-        form = ScriptForm(initial=template) if template else ScriptForm()
+        form = (
+            ScriptForm(initial=template, workspace=request.workspace)
+            if template
+            else ScriptForm(workspace=request.workspace)
+        )
 
     available_tags = Tag.objects.all().order_by("name")
     return render(request, "cpanel/scripts/create.html", {
@@ -215,7 +219,7 @@ def script_edit_view(request: HttpRequest, pk) -> HttpResponse:
     )
 
     if request.method == "POST":
-        form = ScriptForm(request.POST, instance=script)
+        form = ScriptForm(request.POST, instance=script, workspace=request.workspace)
         schedule_form = ScheduleForm(request.POST, instance=schedule)
 
         if form.is_valid() and schedule_form.is_valid():
@@ -265,7 +269,7 @@ def script_edit_view(request: HttpRequest, pk) -> HttpResponse:
             messages.success(request, f'Script "{script.name}" updated successfully.')
             return redirect("cpanel:script_detail", pk=script.pk)
     else:
-        form = ScriptForm(instance=script)
+        form = ScriptForm(instance=script, workspace=request.workspace)
         schedule_form = ScheduleForm(instance=schedule)
 
     available_tags = Tag.objects.all().order_by("name")
