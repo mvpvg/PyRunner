@@ -221,13 +221,13 @@ class ClaudeService:
             "auth_method": provider.auth_method if provider else "",
             "auth_method_label": provider.get_auth_method_display() if provider else "",
             "model": (provider.default_model if provider else "") or "Account default",
-            "cli_available": cls._cli_available(),
+            "cli_available": cls.cli_available(),
             "last_tested": provider.last_tested_at if provider else None,
             "providers_count": AIProvider.objects.count(),
         }
 
     @staticmethod
-    def _cli_available() -> bool:
+    def cli_available() -> bool:
         """Whether a Claude Code CLI is usable.
 
         True if `claude` is on PATH, or if the claude-agent-sdk ships a bundled
@@ -286,7 +286,7 @@ class ClaudeService:
         if not is_anthropic and not base_url:
             return False, "No endpoint URL provided to test."
 
-        if not cls._cli_available():
+        if not cls.cli_available():
             return (
                 False,
                 "The Claude Code CLI is not installed on this server. It ships "

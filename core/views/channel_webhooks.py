@@ -22,6 +22,7 @@ from django.views.decorators.http import require_http_methods
 from django_q.tasks import async_task
 
 from core.models import Channel, ChannelMember, GlobalSettings
+from core.ratelimit import client_ip, rate_limit_exceeded
 from core.services.channels import ChannelError, OutboundMessage, get_provider
 
 logger = logging.getLogger(__name__)
@@ -36,12 +37,12 @@ _REPLY_THROTTLE_TTL = 300
 @csrf_exempt
 @require_http_methods(["POST"])
 def channel_webhook_view(request: HttpRequest, token: str) -> JsonResponse:
-    # Coarse per-IP rate limit (cheap abuse brake before any work).
-    ip = request.META.get("REMOTE_ADDR", "unknown")
-    ip_key = f"channel_ip_rate_{ip}"
-    if cache.get(ip_key, 0) >= _IP_RATE_LIMIT:
+    # Coarse per-IP rate limit (cheap abuse brake before any work). client_ip honors
+    # RATELIMIT_TRUSTED_PROXY_DEPTH so a proxy deploy doesn't collapse every caller
+    # onto the proxy IP.
+    ip = client_ip(request)
+    if rate_limit_exceeded(f"channel_ip_rate_{ip}", _IP_RATE_LIMIT, _RATE_WINDOW):
         return JsonResponse({"error": "rate limited"}, status=429)
-    cache.set(ip_key, cache.get(ip_key, 0) + 1, _RATE_WINDOW)
 
     channel = Channel.objects.filter(
         inbound_token=token, enabled=True, inbound_enabled=True
@@ -77,10 +78,12 @@ def channel_webhook_view(request: HttpRequest, token: str) -> JsonResponse:
     sender_id = msg.sender.get("id")
 
     # Per-sender rate limit (applies even to unapproved senders).
-    s_key = f"channel_sender_rate_{channel.id}_{sender_id}"
-    if cache.get(s_key, 0) >= _SENDER_RATE_LIMIT:
+    if rate_limit_exceeded(
+        f"channel_sender_rate_{channel.id}_{sender_id}",
+        _SENDER_RATE_LIMIT,
+        _RATE_WINDOW,
+    ):
         return JsonResponse({"status": "rate_limited"})
-    cache.set(s_key, cache.get(s_key, 0) + 1, _RATE_WINDOW)
 
     channel.last_inbound_at = timezone.now()
     channel.save(update_fields=["last_inbound_at", "updated_at"])

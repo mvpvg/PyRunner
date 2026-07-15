@@ -9,6 +9,8 @@ from .notification_service import NotificationService
 from .retention_service import RetentionService
 from .system_info_service import SystemInfoService
 from .datastore_service import DatastoreService
+from .database_service import DatabaseService, DatabaseProvisionError
+from .database_explorer import DatabaseExplorerService, DatabaseExplorerError
 from .s3_service import S3Service, S3ServiceError
 from .backup_schedule_service import BackupScheduleService
 from .claude_service import ClaudeService, ClaudeServiceError
@@ -25,6 +27,10 @@ __all__ = [
     "RetentionService",
     "SystemInfoService",
     "DatastoreService",
+    "DatabaseService",
+    "DatabaseProvisionError",
+    "DatabaseExplorerService",
+    "DatabaseExplorerError",
     "S3Service",
     "S3ServiceError",
     "BackupScheduleService",

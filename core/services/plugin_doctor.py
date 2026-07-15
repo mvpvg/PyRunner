@@ -236,7 +236,7 @@ def _check_metadata(folder: Path, report: DoctorReport):
         if not isinstance(provisions, dict):
             failures.append("'provisions' must be an object.")
         else:
-            for count_key in ("scripts", "secrets", "datastores", "schedules"):
+            for count_key in ("scripts", "secrets", "datastores", "databases", "schedules"):
                 if count_key in provisions:
                     n = provisions[count_key]
                     if not isinstance(n, int) or isinstance(n, bool) or n < 0:

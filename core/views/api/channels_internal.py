@@ -21,11 +21,11 @@ POST /internal/channels/send
 import json
 import logging
 
-from django.core.cache import cache
 from django.http import HttpRequest, JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
+from core.ratelimit import rate_limit_exceeded
 from core.views.api.decorators import internal_datastore_token_required
 
 logger = logging.getLogger(__name__)
@@ -42,21 +42,49 @@ def _bad_request(message: str) -> JsonResponse:
     )
 
 
+def _log_outbound_message(channel, text, reply_ref, *, status="ok", error=""):
+    """Record a chat-channel send as an OUT ``ChannelMessage``.
+
+    A ``script`` handler replies asynchronously from its own run via
+    ``pyrunner_notify.reply()`` → this endpoint. Without this row the reply never
+    appears in the channel's conversation history AND never counts toward its
+    ``daily_reply_cap`` (the cost fuse that ``dispatch_inbound`` checks) — so the
+    cap stays stuck at 0 for script channels. Mirrors the synchronous
+    ``channels.inbound._reply`` row. (Run *notifications* go through
+    ``NotificationService`` in-process, not this endpoint, so they are correctly
+    excluded from the cap.) Best-effort: the message is already delivered, so a
+    logging failure must never fail the request.
+    """
+    from core.models import ChannelMessage
+
+    try:
+        ChannelMessage.objects.create(
+            channel=channel,
+            direction=ChannelMessage.Direction.OUT,
+            text=text,
+            reply_ref_json=reply_ref or {},
+            handler=channel.inbound_handler,
+            status=status,
+            error=error,
+        )
+    except Exception:
+        logger.warning("Failed to log outbound ChannelMessage for channel %s", channel.id)
+
+
 @csrf_exempt
 @require_http_methods(["POST"])
 @internal_datastore_token_required
 def send(request: HttpRequest) -> JsonResponse:
     run_id = (getattr(request, "datastore_run", None) or {}).get("run_id")
 
-    # Per-run rate limit.
-    rate_key = f"channel_send_rate_{run_id}"
-    count = cache.get(rate_key, 0)
-    if count >= _RUN_SEND_LIMIT:
+    # Per-run rate limit (fixed window, shared helper).
+    if rate_limit_exceeded(
+        f"channel_send_rate_{run_id}", _RUN_SEND_LIMIT, _RUN_SEND_WINDOW
+    ):
         return JsonResponse(
             {"error": {"code": "RATE_LIMITED", "message": "Per-run send rate exceeded."}},
             status=429,
         )
-    cache.set(rate_key, count + 1, _RUN_SEND_WINDOW)
 
     try:
         data = json.loads(request.body or b"{}")
@@ -115,7 +143,9 @@ def send(request: HttpRequest) -> JsonResponse:
     try:
         result = ChannelService.send(channel, text, reply_ref=reply_ref)
     except ChannelError as e:
+        _log_outbound_message(channel, text, reply_ref, status="error", error=str(e))
         return JsonResponse(
             {"error": {"code": "SEND_FAILED", "message": str(e)}}, status=502
         )
+    _log_outbound_message(channel, text, reply_ref, status="ok")
     return JsonResponse({"ok": True, "result": result})

@@ -58,12 +58,27 @@ from core.views.secrets import (
     secret_edit_view,
     secret_delete_view,
     secret_picker_view,
+    secret_test_resolve_view,
 )
 from core.views.tags import (
     tag_list_view,
     tag_create_view,
     tag_edit_view,
     tag_delete_view,
+)
+from core.views.databases import (
+    database_list_view,
+    database_create_view,
+    database_detail_view,
+    database_edit_view,
+    database_grants_view,
+    database_monitor_view,
+    database_retry_view,
+    database_reveal_view,
+    database_delete_view,
+    database_server_test_view,
+    database_table_view,
+    database_table_csv_view,
 )
 from core.views.datastores import (
     datastore_list_view,
@@ -136,6 +151,9 @@ from core.views.services import (
     ai_provider_save_view,
     ai_provider_delete_view,
     ai_provider_activate_view,
+    secret_provider_save_view,
+    secret_provider_delete_view,
+    secret_provider_test_view,
 )
 from core.views.plugins import (
     plugin_list_view,
@@ -221,6 +239,7 @@ urlpatterns = [
     path("secrets/", secret_list_view, name="secret_list"),
     path("secrets/create/", secret_create_view, name="secret_create"),
     path("api/secret-picker/", secret_picker_view, name="secret_picker"),
+    path("api/secret-test-resolve/", secret_test_resolve_view, name="secret_test_resolve"),
     path("secrets/<uuid:pk>/edit/", secret_edit_view, name="secret_edit"),
     path("secrets/<uuid:pk>/delete/", secret_delete_view, name="secret_delete"),
 
@@ -245,6 +264,20 @@ urlpatterns = [
     path("tags/create/", tag_create_view, name="tag_create"),
     path("tags/<uuid:pk>/edit/", tag_edit_view, name="tag_edit"),
     path("tags/<uuid:pk>/delete/", tag_delete_view, name="tag_delete"),
+
+    # Databases (managed Postgres for scripts & plugins; Owner/Admin only)
+    path("databases/", database_list_view, name="database_list"),
+    path("databases/create/", database_create_view, name="database_create"),
+    path("databases/server-test/", database_server_test_view, name="database_server_test"),
+    path("databases/monitor/", database_monitor_view, name="database_monitor"),
+    path("databases/<uuid:pk>/", database_detail_view, name="database_detail"),
+    path("databases/<uuid:pk>/tables/<str:table>/", database_table_view, name="database_table"),
+    path("databases/<uuid:pk>/tables/<str:table>/csv/", database_table_csv_view, name="database_table_csv"),
+    path("databases/<uuid:pk>/edit/", database_edit_view, name="database_edit"),
+    path("databases/<uuid:pk>/grants/", database_grants_view, name="database_grants"),
+    path("databases/<uuid:pk>/retry/", database_retry_view, name="database_retry"),
+    path("databases/<uuid:pk>/reveal/", database_reveal_view, name="database_reveal"),
+    path("databases/<uuid:pk>/delete/", database_delete_view, name="database_delete"),
 
     # Data Stores
     path("datastores/", datastore_list_view, name="datastore_list"),
@@ -282,7 +315,7 @@ urlpatterns = [
     path("settings/backup/schedule/status/", backup_schedule_status_view, name="backup_schedule_status"),
     path("settings/backup/run-now/", backup_run_now_view, name="backup_run_now"),
 
-    # Workspaces (tenancy management — superuser in Stage 0)
+    # Workspaces (tenancy management — role-based; see core/views/workspaces.py)
     path("workspaces/", workspace_list_view, name="workspace_list"),
     path("workspaces/create/", workspace_create_view, name="workspace_create"),
     path("workspaces/<uuid:pk>/rename/", workspace_rename_view, name="workspace_rename"),
@@ -321,6 +354,9 @@ urlpatterns = [
     path("services/ai/providers/save/", ai_provider_save_view, name="ai_provider_save"),
     path("services/ai/providers/<uuid:provider_id>/delete/", ai_provider_delete_view, name="ai_provider_delete"),
     path("services/ai/providers/<uuid:provider_id>/activate/", ai_provider_activate_view, name="ai_provider_activate"),
+    path("services/secret-providers/save/", secret_provider_save_view, name="secret_provider_save"),
+    path("services/secret-providers/test/", secret_provider_test_view, name="secret_provider_test"),
+    path("services/secret-providers/<uuid:provider_id>/delete/", secret_provider_delete_view, name="secret_provider_delete"),
 
     # Plugins (superuser)
     path("plugins/", plugin_list_view, name="plugin_list"),

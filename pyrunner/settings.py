@@ -15,6 +15,7 @@ import shutil
 from pathlib import Path
 
 from django.core.exceptions import ImproperlyConfigured
+from django.db.backends.signals import connection_created
 from dotenv import load_dotenv
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -28,8 +29,16 @@ load_dotenv(BASE_DIR / ".env")
 # See https://docs.djangoproject.com/en/6.0/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-# SECRET_KEY is required - generate one with: python -c "from django.core.management.utils import get_random_secret_key; print(get_random_secret_key())"
-SECRET_KEY = os.environ["SECRET_KEY"]
+# A missing SECRET_KEY raises a friendly ImproperlyConfigured (with the generate
+# command) instead of a bare KeyError traceback — Docker users get the same guidance
+# from entrypoint.sh, this covers source checkouts run without a .env.
+SECRET_KEY = os.environ.get("SECRET_KEY")
+if not SECRET_KEY:
+    raise ImproperlyConfigured(
+        "SECRET_KEY is required. Generate one with: "
+        'python -c "from django.core.management.utils import '
+        'get_random_secret_key; print(get_random_secret_key())"'
+    )
 
 # SECURITY WARNING: don't run with debug turned on in production!
 # Defaults to False for security - set DEBUG=True explicitly for development
@@ -84,6 +93,9 @@ MIDDLEWARE = [
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
     "core.middleware.SetupWizardMiddleware",
+    # Render all template datetimes in the instance display timezone
+    # (GlobalSettings.timezone); storage stays UTC.
+    "core.middleware.TimezoneMiddleware",
     # Tenancy (Decision 1): resolve request.workspace from the optional /w/<id>/
     # URL prefix. Last so request.user + the URL kwarg are both available.
     "core.middleware.ActiveWorkspaceMiddleware",
@@ -102,6 +114,7 @@ TEMPLATES = [
                 "django.contrib.auth.context_processors.auth",
                 "django.contrib.messages.context_processors.messages",
                 "core.context_processors.pyrunner_version",
+                "core.context_processors.instance_meta",
                 "core.context_processors.plugin_nav",
                 "core.context_processors.workspaces",
             ],
@@ -148,8 +161,6 @@ def _enable_sqlite_wal(sender, connection, **kwargs):
         cursor.execute("PRAGMA journal_mode=WAL;")
         cursor.execute("PRAGMA busy_timeout=30000;")
 
-
-from django.db.backends.signals import connection_created
 
 connection_created.connect(_enable_sqlite_wal)
 
@@ -481,7 +492,6 @@ def _get_q_cluster_config():
     try:
         from django.apps import apps
         from django.db import connection
-        from django.db.utils import OperationalError, ProgrammingError
 
         if apps.ready:
             with connection.cursor() as cursor:
@@ -501,7 +511,7 @@ def _get_q_cluster_config():
                         )
                     config["retry"] = row[2] or config["retry"]
                     config["queue_limit"] = row[3] or config["queue_limit"]
-    except (OperationalError, ProgrammingError, Exception):
+    except Exception:
         # Database not ready yet (migrations not run), use defaults
         pass
 
@@ -573,12 +583,14 @@ if not ENCRYPTION_KEY:
             "Generate one with: python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
         )
 else:
-    # Validate key format
+    # Validate key format (env vars are always str, so encode unconditionally).
     try:
         from cryptography.fernet import Fernet
-        Fernet(ENCRYPTION_KEY.encode() if isinstance(ENCRYPTION_KEY, str) else ENCRYPTION_KEY)
+        Fernet(ENCRYPTION_KEY.encode())
     except Exception:
-        raise ImproperlyConfigured("ENCRYPTION_KEY is invalid. Must be a valid Fernet key.")
+        raise ImproperlyConfigured(
+            "ENCRYPTION_KEY is invalid. Must be a valid Fernet key."
+        ) from None
 
 
 # Logging Configuration
@@ -629,6 +641,15 @@ LOGGING = {
         },
     },
 }
+
+
+# Per-IP rate limiters (webhook + inbound-channel) key on the client IP. Behind a
+# reverse proxy the direct peer is the proxy, so every caller shares one IP and the
+# per-IP limit becomes instance-global. Set this to the number of trusted proxy hops
+# in front of PyRunner (e.g. 1 for a single Coolify/Traefik edge) to derive the
+# client IP from the RIGHT of X-Forwarded-For (the entry your trusted proxy appended,
+# which callers cannot forge). 0 (default) = use REMOTE_ADDR — correct with no proxy.
+RATELIMIT_TRUSTED_PROXY_DEPTH = int(os.environ.get("RATELIMIT_TRUSTED_PROXY_DEPTH", "0"))
 
 
 # Security Settings
@@ -697,12 +718,34 @@ PYRUNNER_INTERNAL_BASE_URL = os.environ.get(
     "PYRUNNER_INTERNAL_BASE_URL", f"http://127.0.0.1:{os.environ.get('PORT', '8000')}"
 )
 
+# Databases feature: managed Postgres schemas scripts/plugins can use as real
+# relational databases (complements DataStore, never replaces it). Points at a
+# SEPARATE Postgres database from the core one — even on a shared server — with
+# a provisioner role that can CREATE SCHEMA on that database and CREATE ROLE
+# (NOT a superuser). Unset => the Databases feature shows "not configured";
+# nothing else is affected. Works with a SQLite core: this is the whole switch.
+#   PYRUNNER_DATA_DB_URL=postgres://provisioner:pass@db:5432/pyrunner_data
+PYRUNNER_DATA_DB_URL = os.environ.get("PYRUNNER_DATA_DB_URL", "").strip()
+
+# Hygiene defaults stamped onto every provisioned database role. statement
+# timeout guards against runaway queries (0 = off); the connection limit stops
+# one database's clients from exhausting the server's slots.
+PYRUNNER_DATA_DB_STATEMENT_TIMEOUT_MS = int(
+    os.environ.get("PYRUNNER_DATA_DB_STATEMENT_TIMEOUT_MS", "300000")  # 5 min
+)
+PYRUNNER_DATA_DB_CONNECTION_LIMIT = int(
+    os.environ.get("PYRUNNER_DATA_DB_CONNECTION_LIMIT", "10")
+)
+
 # Per-run env hardening: PyRunner's own infra secrets are never copied into a
 # script's environment (scripts get their own values via the Secrets feature).
+# PYRUNNER_DATA_DB_URL is the data-server PROVISIONER credential — scripts get
+# per-database scoped credentials via the pyrunner_db helper, never this one.
 PYRUNNER_RUN_ENV_DENYLIST = [
     v.strip()
     for v in os.environ.get(
-        "PYRUNNER_RUN_ENV_DENYLIST", "ENCRYPTION_KEY,SECRET_KEY,DATABASE_URL"
+        "PYRUNNER_RUN_ENV_DENYLIST",
+        "ENCRYPTION_KEY,SECRET_KEY,DATABASE_URL,PYRUNNER_DATA_DB_URL",
     ).split(",")
     if v.strip()
 ]

@@ -116,6 +116,14 @@ class DoctorMetadataTests(SimpleTestCase):
         report = self._check({"slug": "goodplug", "provisions": {"scripts": "two"}})
         self.assertFalse(report.ok)
 
+    def test_provisions_databases_count_validated(self):
+        # Valid int passes (API 2.2 resource key)…
+        report = self._check({"slug": "goodplug", "provisions": {"databases": 1}})
+        self.assertTrue(report.ok, report.format())
+        # …and a wrong type blocks, same as every other resource count.
+        report = self._check({"slug": "goodplug", "provisions": {"databases": "one"}})
+        self.assertFalse(report.ok)
+
     def test_provisions_secret_keys_must_be_list_of_strings(self):
         report = self._check({"slug": "goodplug", "provisions": {"secret_keys": [1, 2]}})
         self.assertFalse(report.ok)
@@ -155,6 +163,10 @@ class PluginAccessorTests(SimpleTestCase):
     def test_provisions_summary_formats_and_pluralizes(self):
         p = self._p({"provisions": {"scripts": 1, "secrets": 3, "datastores": 1, "schedules": 2}})
         self.assertEqual(p.provisions_summary, "1 script, 3 secrets, 1 data store, 2 schedules")
+
+    def test_provisions_summary_includes_databases(self):
+        p = self._p({"provisions": {"databases": 2, "scripts": 1}})
+        self.assertEqual(p.provisions_summary, "1 script, 2 databases")
 
     def test_provisions_summary_skips_zero_missing_and_bool(self):
         p = self._p({"provisions": {"scripts": 0, "secrets": True, "datastores": 2}})

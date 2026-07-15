@@ -138,7 +138,7 @@ class EnvironmentService:
                                         "display": display,
                                     }
                                 )
-        except (subprocess.TimeoutExpired, FileNotFoundError, Exception) as e:
+        except Exception as e:
             logger.debug(f"py launcher discovery failed: {e}")
         return pythons
 
@@ -180,7 +180,7 @@ class EnvironmentService:
                 output = result.stdout.strip() or result.stderr.strip()
                 if output.startswith("Python "):
                     return output.replace("Python ", "")
-        except (subprocess.TimeoutExpired, FileNotFoundError, Exception) as e:
+        except Exception as e:
             logger.debug(f"Failed to get version for {python_path}: {e}")
         return None
 
@@ -331,7 +331,7 @@ class EnvironmentService:
                 logger.warning(f"pip list failed: {result.stderr}")
                 return []
 
-        except (subprocess.TimeoutExpired, json.JSONDecodeError, Exception) as e:
+        except Exception as e:
             logger.error(f"Failed to get installed packages: {e}")
             return []
 

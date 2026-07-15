@@ -70,7 +70,8 @@ fi
 echo ""
 echo "[*] Starting services..."
 
-# PID file location
+# PID file location — `manage.py restart_workers` reads this to SIGTERM the
+# worker; the monitor loop below rewrites it when it starts a replacement.
 QCLUSTER_PID_FILE="/tmp/qcluster.pid"
 
 # Function to start qcluster worker
@@ -82,51 +83,13 @@ start_qcluster() {
     echo "    - Worker started with PID $QCLUSTER_PID"
 }
 
-# Function to stop qcluster gracefully
-stop_qcluster() {
-    if [ -f "$QCLUSTER_PID_FILE" ]; then
-        local pid=$(cat "$QCLUSTER_PID_FILE")
-        if kill -0 $pid 2>/dev/null; then
-            echo "[*] Stopping worker (PID $pid)..."
-            kill -TERM $pid 2>/dev/null || true
-            # Wait up to 30 seconds for graceful shutdown
-            local count=0
-            while kill -0 $pid 2>/dev/null && [ $count -lt 30 ]; do
-                sleep 1
-                count=$((count + 1))
-            done
-            # Force kill if still running
-            if kill -0 $pid 2>/dev/null; then
-                echo "[!] Worker did not stop gracefully, force killing..."
-                kill -9 $pid 2>/dev/null || true
-            fi
-        fi
-        rm -f "$QCLUSTER_PID_FILE"
-    fi
-}
-
-# Signal handler for restart request (SIGUSR1)
-handle_restart() {
-    echo ""
-    echo "[*] Restart signal received, restarting workers..."
-    stop_qcluster
-    start_qcluster
-    echo "[*] Workers restarted successfully"
-}
-trap handle_restart SIGUSR1
-
-# Handle graceful shutdown
-cleanup() {
-    echo ""
-    echo "[*] Shutting down..."
-    stop_qcluster
-    # Kill monitor if running
-    if [ -n "$MONITOR_PID" ]; then
-        kill $MONITOR_PID 2>/dev/null || true
-    fi
-    exit 0
-}
-trap cleanup SIGTERM SIGINT
+# NOTE: no signal traps here on purpose. The `exec gunicorn` at the bottom
+# replaces this shell, so any trap set now would silently die with it — an
+# earlier version trapped SIGUSR1 for "restart workers" and SIGTERM for
+# cleanup, and both were dead code from the moment gunicorn started. The
+# monitor loop below is the one restart mechanism: anything that wants a fresh
+# worker (the Settings "Restart workers" button, a crash, an OOM kill) just
+# has to make the old process die.
 
 # Start workers initially
 start_qcluster
@@ -158,8 +121,8 @@ monitor_workers() {
         fi
     done
 }
+# The monitor is a child process, so it SURVIVES the exec below.
 monitor_workers &
-MONITOR_PID=$!
 
 # Start gunicorn web server
 echo "    - Starting web server on port ${PORT:-8000}..."
@@ -174,6 +137,12 @@ echo "  Open http://localhost:${PUBLIC_PORT:-${PORT:-8000}}"
 echo "=========================================="
 echo ""
 
+# exec makes gunicorn PID 1: `docker stop` delivers SIGTERM straight to it for
+# a clean web shutdown. The monitor + qcluster children get no TERM and are
+# SIGKILLed at Docker's grace deadline — safe by design: django-q2 re-delivers
+# interrupted tasks, and execute_run's PENDING-status guard makes duplicate
+# deliveries no-ops. (A shell trap can't forward TERM here — no trap survives
+# exec — and keeping gunicorn as PID 1 is the more robust default.)
 exec gunicorn pyrunner.wsgi:application \
     --bind 0.0.0.0:${PORT:-8000} \
     --workers ${GUNICORN_WORKERS:-2} \

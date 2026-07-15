@@ -37,6 +37,14 @@ logger = logging.getLogger(__name__)
 # Preference order: nsjail is batteries-included (mount + seccomp + netns +
 # rlimits + time limits in one config); bubblewrap is the simpler, more-universal
 # fallback. Whichever is on PATH is auto-detected.
+#
+# NOTE: execution (executor_backends/sandboxed._BACKEND_TOOLS) prefers bubblewrap
+# first — its "validated wrapper". The two orders diverge ONLY on a host with BOTH
+# binaries installed (uncommon; the official image ships bubblewrap only), where the
+# probe would validate nsjail while a run uses bwrap. Left as-is deliberately: the
+# probe answers "can this host sandbox at all?" and surfaces the tool it validated in
+# its result detail; forcing the orders to match is a design call on this locked,
+# real-stack-verified subsystem, not a mechanical cleanup.
 SANDBOX_TOOLS = ("nsjail", "bwrap")
 
 # Capability tiers — must match GlobalSettings.SandboxCapability values.

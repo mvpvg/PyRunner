@@ -26,7 +26,8 @@ sandbox exists to close, so when actually sandboxing we **drop
 ``PYRUNNER_DB_PATH`` from the run env** — the helper then transparently uses the
 loopback internal API (``PYRUNNER_INTERNAL_URL`` + token, which the executor
 already injects). Network is shared (not unshared) so the loopback API and
-ordinary outbound calls keep working; strict egress is a later stage.
+ordinary outbound calls keep working; strict egress filtering is intentionally
+out of scope (automation scripts need outbound).
 """
 
 import logging
@@ -69,10 +70,12 @@ def reset_runtime_tier() -> None:
 
 
 def _backend_tool() -> "str | None":
-    """First usable sandbox binary for *execution* (bwrap preferred)."""
+    """Absolute path of the first usable sandbox binary for *execution* (bwrap
+    preferred), or ``None`` if neither is on PATH."""
     for tool in _BACKEND_TOOLS:
-        if shutil.which(tool):
-            return tool
+        path = shutil.which(tool)
+        if path:
+            return path
     return None
 
 
@@ -165,7 +168,7 @@ class SandboxedSubprocessBackend(LocalSubprocessBackend):
 
     def start(self, spec: RunSpec) -> RunHandle:
         tier = runtime_tier()
-        tool_path = shutil.which(_backend_tool() or "") if _backend_tool() else None
+        tool_path = _backend_tool()
 
         if tier != CAP_FULL or not tool_path:
             # Host can't deliver a full sandbox right now — run plain + rlimits.

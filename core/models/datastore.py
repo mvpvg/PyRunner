@@ -28,7 +28,8 @@ class DataStore(models.Model):
         help_text="Name for this data store (used in scripts), unique per workspace",
     )
 
-    # Tenancy seam (Phase A): nullable, backfilled to the default workspace.
+    # Tenancy: nullable + backfilled to the default workspace for upgrade-safety;
+    # queries scope through WorkspaceScopedManager (.for_workspace).
     workspace = models.ForeignKey(
         "core.Workspace",
         on_delete=models.SET_NULL,
@@ -112,8 +113,8 @@ class DataStore(models.Model):
         """Resolve a datastore by ``name`` within a workspace (tenancy Decision 2B).
 
         Names are unique per workspace, so this returns at most one row. The
-        transitional rule (until the Stage 3 creation-sweep) keeps a
-        single-workspace instance byte-for-byte:
+        back-compat rule keeps a single-workspace / pre-tenancy instance
+        byte-for-byte:
         - an un-scoped lookup (``workspace_id`` None) defaults to the default
           workspace, so a run/token without a workspace still resolves today's
           stores;

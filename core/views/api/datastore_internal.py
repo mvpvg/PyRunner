@@ -1,14 +1,16 @@
 """
 Internal DataStore API (Seam 1 — DB engine-agnostic foundation).
 
-This is the *seam*, not the cutover. It exposes the full key-value surface the
-script-side ``pyrunner_datastore`` helper needs, but entirely through the Django
-ORM (``DataStore`` / ``DataStoreEntry``), so it is engine-agnostic for free —
-identical on SQLite and, later, Postgres. In Phase A nothing calls it on the hot
-path: the helper still reads SQLite directly (byte-for-byte with today). Stage 2
-points the helper here once the endpoint is hardened end-to-end.
+It exposes the full key-value surface the script-side ``pyrunner_datastore``
+helper needs, entirely through the Django ORM (``DataStore`` / ``DataStoreEntry``),
+so it is engine-agnostic for free — identical on SQLite and Postgres. This is the
+live path on deployments with no local DB file (Postgres): the helper's API
+backend calls it over loopback, authenticated by a signed per-run token. On
+SQLite deployments the helper reads the DB file directly (``PYRUNNER_DB_PATH``)
+and this endpoint is idle.
 
-Contract notes (so the Stage-2 client can reproduce today's exceptions exactly):
+Contract notes (so the helper's API backend reproduces the SQLite path's
+exceptions exactly):
 - store missing            -> 404 STORE_NOT_FOUND  (client: ValueError)
 - entry/key missing        -> 404 KEY_NOT_FOUND    (client: KeyError)
 - values round-trip through ``DataStoreEntry.get_value()/set_value()`` — the same

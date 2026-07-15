@@ -91,7 +91,7 @@ class PyAIService:
             s.pyai_enabled
             and s.claude_enabled
             and ClaudeService.is_configured()
-            and ClaudeService._cli_available()
+            and ClaudeService.cli_available()
         )
 
     @classmethod

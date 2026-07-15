@@ -8,10 +8,11 @@ from datetime import timedelta
 from django.db.models import QuerySet
 from django.utils import timezone
 
-logger = logging.getLogger(__name__)
+# The name lives in schedule_service's infra-schedule registry so global
+# pause/resume can never delete or forget this schedule.
+from core.services.schedule_service import CLEANUP_SCHEDULE_NAME
 
-# Name for the auto-cleanup schedule in django-q2
-CLEANUP_SCHEDULE_NAME = "pyrunner-auto-cleanup"
+logger = logging.getLogger(__name__)
 
 
 class RetentionService:

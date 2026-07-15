@@ -212,10 +212,11 @@
 
 {% block extra_scripts %}
 {% if has_data %}
+{{ chart_json|json_script:"usage-chart-data" }}
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <script>
 (function () {
-    const data = {{ chart_json|safe }};
+    const data = JSON.parse(document.getElementById("usage-chart-data").textContent);
     const ctx = document.getElementById('usageChart');
     if (!ctx || typeof Chart === 'undefined') return;
 

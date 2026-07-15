@@ -63,13 +63,13 @@ class SetupService:
         }
 
         try:
-            # Check if database tables exist
+            # Check if the core tables exist. Uses Django's introspection so it
+            # works on every backend — a raw ``sqlite_master`` query reported
+            # database_ready=False (+ an error) on a healthy Postgres instance.
             from django.db import connection
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table' AND name='global_settings'"
-                )
-                status["database_ready"] = cursor.fetchone() is not None
+            status["database_ready"] = (
+                "global_settings" in connection.introspection.table_names()
+            )
         except Exception as e:
             status["errors"].append(f"Database check failed: {e}")
 

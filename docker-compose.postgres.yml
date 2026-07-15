@@ -15,12 +15,20 @@ services:
   db:
     image: postgres:16-alpine
     container_name: pyrunner-db
+    # pg_stat_statements is preloaded for the Databases feature's monitoring
+    # (slow-query stats); harmless when unused.
+    command: postgres -c shared_preload_libraries=pg_stat_statements
     environment:
       - POSTGRES_USER=${POSTGRES_USER:-pyrunner}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-pyrunner}
       - POSTGRES_DB=${POSTGRES_DB:-pyrunner}
+      # Databases feature: separate data database + provisioner role, created
+      # by docker/init-data-db.sh on FIRST boot only (fresh volume).
+      - DATA_DB_NAME=${DATA_DB_NAME:-pyrunner_data}
+      - DATA_DB_PASSWORD=${DATA_DB_PASSWORD:-pyrunner-data}
     volumes:
       - pyrunner_pgdata:/var/lib/postgresql/data
+      - ./docker/init-data-db.sh:/docker-entrypoint-initdb.d/10-init-data-db.sh:ro
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-pyrunner} -d ${POSTGRES_DB:-pyrunner}"]
@@ -55,6 +63,10 @@ services:
 
       # The engine switch: point PyRunner at the managed Postgres service.
       - DATABASE_URL=postgres://${POSTGRES_USER:-pyrunner}:${POSTGRES_PASSWORD:-pyrunner}@db:5432/${POSTGRES_DB:-pyrunner}
+
+      # Databases feature: same server, separate database + provisioner role
+      # (created on first boot by docker/init-data-db.sh). Remove to disable.
+      - PYRUNNER_DATA_DB_URL=postgres://pyrunner_provisioner:${DATA_DB_PASSWORD:-pyrunner-data}@db:5432/${DATA_DB_NAME:-pyrunner_data}
 
       # Email settings (optional)
       - EMAIL_BACKEND=${EMAIL_BACKEND:-django.core.mail.backends.console.EmailBackend}

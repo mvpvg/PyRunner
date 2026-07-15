@@ -11,7 +11,7 @@ from pathlib import Path
 
 from django.conf import settings
 from django.contrib import messages
-from django.contrib.auth.decorators import login_required, user_passes_test
+from django.contrib.auth.decorators import login_required
 from django.http import FileResponse, Http404, HttpRequest, HttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.views.decorators.http import require_POST
@@ -19,6 +19,7 @@ from django.views.decorators.http import require_POST
 from core.forms import PluginUploadForm
 from core.models import Plugin
 from core.services import PluginInstallError, PluginService
+from core.views.decorators import superuser_required
 
 logger = logging.getLogger(__name__)
 
@@ -31,11 +32,6 @@ _ICON_CONTENT_TYPES = {
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
 }
-
-
-def superuser_required(view_func):
-    """Require superuser status (mirrors core.views.settings)."""
-    return user_passes_test(lambda u: u.is_superuser, login_url="auth:login")(view_func)
 
 
 @login_required

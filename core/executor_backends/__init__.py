@@ -56,8 +56,9 @@ def get_run_backend() -> RunBackend:
     the host can't sandbox). Any unknown value falls back to ``local`` with a
     warning rather than breaking runs — a typo should never fail a user's run.
 
-    ``PYRUNNER_RUN_BACKEND`` is an optional break-glass override; per-run policy
-    selection (instance/workspace/script) is wired in a later stage.
+    ``PYRUNNER_RUN_BACKEND`` is an optional break-glass override; the normal
+    per-run policy selection (instance/workspace/script) is done by
+    ``core.executor._select_backend_for_run``.
     """
     name = os.environ.get("PYRUNNER_RUN_BACKEND", "local").strip().lower()
     if name in ("", "local"):

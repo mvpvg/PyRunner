@@ -6,15 +6,26 @@ Manages django-q2 schedules for automated S3 backups.
 
 import logging
 from datetime import timedelta
+from zoneinfo import ZoneInfo
 
 from django.utils import timezone
 from django_q.models import Schedule as QSchedule
 
 from core.models import GlobalSettings
 
+# The name lives in schedule_service's infra-schedule registry so global
+# pause/resume can never delete or forget this schedule. ScheduleService also
+# owns the shared local-time -> UTC cron conversion.
+from core.services.schedule_service import BACKUP_SCHEDULE_NAME, ScheduleService
+
 logger = logging.getLogger(__name__)
 
-BACKUP_SCHEDULE_NAME = "pyrunner-scheduled-backup"
+
+def _instance_tz(settings) -> ZoneInfo:
+    """The instance timezone (GlobalSettings.timezone), UTC on a bad value."""
+    from core.tz import safe_zoneinfo
+
+    return safe_zoneinfo(settings.timezone, context="instance timezone")
 
 
 class BackupScheduleService:
@@ -66,10 +77,17 @@ class BackupScheduleService:
             logger.info(f"Created daily backup schedule, next run at {next_run}")
 
         elif settings.s3_backup_schedule == GlobalSettings.S3BackupSchedule.WEEKLY:
-            # Use CRON for weekly (minute hour * * day_of_week)
-            # Convert Python weekday (0=Mon) to cron weekday (0=Sun)
-            cron_day = (settings.s3_backup_day + 1) % 7
-            cron_expr = f"{settings.s3_backup_time.minute} {settings.s3_backup_time.hour} * * {cron_day}"
+            # Use CRON for weekly (minute hour * * day_of_week). The stored
+            # time is in the INSTANCE timezone; convert to UTC and shift the
+            # weekday with it if it crosses UTC midnight, then map Python
+            # weekday (0=Mon) to cron weekday (0=Sun).
+            utc_hour, utc_minute, day_shift = ScheduleService._local_time_to_utc(
+                _instance_tz(settings),
+                settings.s3_backup_time.hour,
+                settings.s3_backup_time.minute,
+            )
+            cron_day = ((settings.s3_backup_day + day_shift) % 7 + 1) % 7
+            cron_expr = f"{utc_minute} {utc_hour} * * {cron_day}"
 
             QSchedule.objects.create(
                 name=BACKUP_SCHEDULE_NAME,
@@ -88,16 +106,21 @@ class BackupScheduleService:
         """
         Calculate next backup run time.
 
+        The stored backup time is a wall-clock time in the instance timezone;
+        the arithmetic happens there and the result converts to UTC.
+
         Args:
             settings: GlobalSettings instance
 
         Returns:
-            datetime: Next scheduled run time
+            datetime: Next scheduled run time (UTC)
         """
-        now = timezone.now()
+        from datetime import timezone as dt_timezone
+
+        now = timezone.now().astimezone(_instance_tz(settings))
         backup_time = settings.s3_backup_time
 
-        # Create datetime for today at backup time
+        # Create datetime for today at backup time (instance-local)
         next_run = now.replace(
             hour=backup_time.hour,
             minute=backup_time.minute,
@@ -120,7 +143,7 @@ class BackupScheduleService:
 
             next_run += timedelta(days=days_ahead)
 
-        return next_run
+        return next_run.astimezone(dt_timezone.utc)
 
     @classmethod
     def get_schedule_status(cls) -> dict:

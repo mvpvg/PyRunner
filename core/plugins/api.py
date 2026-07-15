@@ -39,7 +39,9 @@ from typing import Optional
 # on a breaking change to the facade. The wrapped CORE services stay stable.
 # 2.1 (additive): ScriptAPI run-lifecycle surface (latest_run/runs/
 # cancel_latest_run + the RunView read-model).
-API_VERSION = "2.1"
+# 2.2 (additive): DatabaseAPI — owner-scoped managed Postgres databases
+# (provision/get/list/grant/dsn) on the attached data server.
+API_VERSION = "2.2"
 
 
 # --------------------------------------------------------------------------- #
@@ -500,6 +502,119 @@ class DataStoreAPI:
 
 
 # --------------------------------------------------------------------------- #
+# Databases — real SQL (managed Postgres schemas on the data server)
+# --------------------------------------------------------------------------- #
+
+class DatabaseAPI:
+    """Owner-scoped managed SQL databases — a real Postgres schema + role per
+    database, isolated by Postgres itself. The stored ``name`` is auto-derived
+    ``"<owner>:<key>"`` (owner=None ⇒ the raw key), exactly like DataStoreAPI.
+
+    ``provision()`` creates REAL server-side objects, so the instance must have
+    a data server attached (``PYRUNNER_DATA_DB_URL``); it raises
+    ``DatabaseProvisionError`` otherwise — call ``is_available()`` first for a
+    graceful degrade path. The plugin's WORKER script then connects with
+    ``pyrunner_db.connect("<owner>:<key>")`` after a ``grant()``; the plugin's
+    own VIEWS (a dashboard reading its tables) use ``dsn()`` + psycopg.
+    """
+
+    def __init__(self, owner=None, workspace=None):
+        self.owner = owner
+        self._workspace = workspace
+
+    def _ws(self):
+        return _resolve_workspace(self._workspace)
+
+    def _name_for(self, key):
+        return f"{self.owner}:{key}" if self.owner else key
+
+    def is_available(self):
+        """Whether this instance has a data server attached."""
+        from core.services import DatabaseService
+
+        return DatabaseService.is_configured()
+
+    def provision(self, key, *, description=None, created_by=None):
+        """Ensure the owned database exists AND is provisioned server-side.
+
+        Idempotent on the auto-derived name: re-running updates the same row and
+        re-stamps the server objects (which also heals a row stuck in
+        ``status='error'`` from an earlier failure). Raises
+        ``DatabaseProvisionError`` when the data server is unreachable or not
+        configured — fail-closed, never a silently-unusable database.
+        """
+        from core.models import Database
+        from core.services import DatabaseService
+
+        name = self._name_for(key)
+        database = Database.objects.filter(workspace=self._ws(), name=name).first()
+        if database is None:
+            return DatabaseService.create_database(
+                name=name,
+                workspace=self._ws(),
+                description=description or "",
+                created_by=created_by,
+                owner_plugin=self.owner,
+                owner_key=key if self.owner else None,
+            )
+
+        database.owner_plugin = self.owner
+        database.owner_key = key if self.owner else None
+        if description is not None:
+            database.description = description
+        database.save()
+        DatabaseService.provision(database)
+        return database
+
+    def get(self, key):
+        from core.models import Database
+
+        return Database.objects.filter(
+            workspace=self._ws(), name=self._name_for(key)
+        ).first()
+
+    def list(self):
+        from core.models import Database
+
+        qs = Database.objects.filter(workspace=self._ws())
+        qs = (
+            qs.filter(owner_plugin=self.owner)
+            if self.owner
+            else qs.filter(owner_plugin__isnull=True)
+        )
+        return list(qs.order_by("name"))
+
+    def grant(self, script, database, *, active=True):
+        """Attach ``database`` to ``script`` so its runs can connect (idempotent).
+
+        Database access is EXPLICIT-ONLY — unlike secrets there is no 'all'
+        injection mode, so a plugin's worker script needs this grant before
+        ``pyrunner_db`` will resolve the database's credentials.
+        """
+        from core.models import DatabaseGrant
+
+        grant, created = DatabaseGrant.objects.get_or_create(
+            script=script, database=database, defaults={"active": active}
+        )
+        if not created and grant.active != active:
+            grant.active = active
+            grant.save(update_fields=["active"])
+        return grant
+
+    def dsn(self, key):
+        """The scoped DSN of the owned database, or None when it doesn't exist
+        or isn't ready. For the plugin's OWN server-side code (e.g. a dashboard
+        view reading its tables with psycopg) — handle it like a password; the
+        connection is confined to the database's schema either way."""
+        from core.services import DatabaseService
+
+        database = self.get(key)
+        if database is None or not database.is_ready:
+            return None
+        return DatabaseService.scoped_dsn(database)
+
+
+# --------------------------------------------------------------------------- #
 # Schedules
 # --------------------------------------------------------------------------- #
 
@@ -542,10 +657,18 @@ class ScheduleAPI:
         sched.monthly_times = []
 
         if mode == ScriptSchedule.RunMode.INTERVAL:
+            if not interval_minutes:
+                raise ValueError("interval mode requires interval_minutes")
             sched.interval_minutes = int(interval_minutes)
         elif mode == ScriptSchedule.RunMode.DAILY:
+            if not time_str:
+                raise ValueError("daily mode requires time_str (HH:MM)")
             sched.daily_times = [time_str]
         elif mode == ScriptSchedule.RunMode.WEEKLY:
+            if weekday is None:
+                raise ValueError("weekly mode requires weekday (0=Mon … 6=Sun)")
+            if not time_str:
+                raise ValueError("weekly mode requires time_str (HH:MM)")
             sched.weekly_days = [int(weekday)]
             sched.weekly_times = [time_str]
 

@@ -43,7 +43,8 @@ class ScriptSchedule(models.Model):
         related_name="schedule",
     )
 
-    # Tenancy seam (Phase A): nullable, backfilled to the default workspace.
+    # Tenancy: nullable + backfilled to the default workspace for upgrade-safety;
+    # queries scope through WorkspaceScopedManager (.for_workspace).
     workspace = models.ForeignKey(
         "core.Workspace",
         on_delete=models.SET_NULL,
@@ -184,6 +185,26 @@ class ScriptSchedule(models.Model):
             times = ", ".join(self.monthly_times) if self.monthly_times else "No times set"
             return f"Monthly on day {days} at {times} ({self.timezone})"
         return "Unknown"
+
+    def config_snapshot(self) -> dict:
+        """Serialize the schedule's mode configuration for audit history diffs.
+
+        Includes EVERY mode's fields (interval/daily/weekly/monthly), not just the
+        active mode's — ``ScheduleHistory`` compares the before/after snapshots to
+        decide whether a change occurred, so a weekly- or monthly-only edit used to
+        be invisible (and wrote no history entry) when those fields were omitted.
+        """
+        return {
+            "run_mode": self.run_mode,
+            "interval_minutes": self.interval_minutes,
+            "daily_times": self.daily_times,
+            "weekly_days": self.weekly_days,
+            "weekly_times": self.weekly_times,
+            "monthly_days": self.monthly_days,
+            "monthly_times": self.monthly_times,
+            "timezone": self.timezone,
+            "is_active": self.is_active,
+        }
 
 
 class ScheduleHistory(models.Model):

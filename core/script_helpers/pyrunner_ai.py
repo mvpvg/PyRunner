@@ -1,18 +1,20 @@
 """
 PyRunner Claude AI helper for scripts.
 
-Run AI directly inside your scripts using the Claude account you configured in
-PyRunner (Services -> Claude AI). It reuses your Claude subscription (via a
-Claude Code OAuth token) or an Anthropic API key -- whichever you set there --
-so you don't manage credentials per script. Web search and web fetch are
-enabled by default.
+Run AI directly inside your scripts using the provider you configured in
+PyRunner (Services -> AI Provider) -- your Claude subscription, an Anthropic
+API key, or any Anthropic-compatible provider (Z.AI, OpenRouter, Ollama, a
+custom endpoint). The credential is injected into your script runs
+automatically, so you don't manage keys per script. Web search and web fetch
+are enabled by default (note: WebSearch is served by Anthropic's API, so on
+non-Anthropic providers only WebFetch works).
 
 Under the hood this wraps the official `claude-agent-sdk` and exposes a simple
 *synchronous* API, so you can use it from ordinary (non-async) scripts.
 
 Requirements
 ------------
-1. Configure and enable Claude in PyRunner: Services -> Claude AI.
+1. Configure and enable an AI provider in PyRunner: Services -> AI Provider.
 2. Install the SDK into this script's Environment:
    Environments -> (your env) -> Packages -> install ``claude-agent-sdk``.
    (The Claude Code CLI itself ships with the PyRunner Docker image.)
@@ -107,9 +109,14 @@ class ClaudeResult:
 
 
 def _has_credentials() -> bool:
+    # Must accept every shape ClaudeService._build_env injects: Anthropic auth
+    # arrives as CLAUDE_CODE_OAUTH_TOKEN (subscription) or ANTHROPIC_API_KEY
+    # (API key); third-party providers (Z.AI/OpenRouter/Ollama/custom) as
+    # ANTHROPIC_AUTH_TOKEN (with ANTHROPIC_API_KEY explicitly blanked).
     return bool(
         os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
         or os.environ.get("ANTHROPIC_API_KEY")
+        or os.environ.get("ANTHROPIC_AUTH_TOKEN")
     )
 
 
@@ -371,8 +378,8 @@ def _record_usage_api(base_url: str, token: str, payload: dict) -> None:
 def _prepare(tools):
     if not _has_credentials():
         raise ClaudeNotConfiguredError(
-            "Claude is not configured for this script. Enable it in PyRunner "
-            "under Services -> Claude AI (the credential is injected "
+            "AI is not configured for this script. Enable it in PyRunner "
+            "under Services -> AI Provider (the credential is injected "
             "automatically into your script runs)."
         )
     sdk = _import_sdk()

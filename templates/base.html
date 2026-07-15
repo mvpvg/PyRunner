@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{% block title %}PyRunner{% endblock %}</title>
+    <title>{% block title %}{{ instance_name }}{% endblock %}</title>
     <link rel="icon" type="image/x-icon" href="{% static 'fav.ico' %}">
 
     {# Set theme before paint to avoid a flash of the wrong theme #}
@@ -19,10 +19,7 @@
         })();
     </script>
 
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
-
+    {# Fonts are self-hosted via @font-face in the compiled stylesheet (no CDN). #}
     <link rel="stylesheet" href="{% static 'css/dist/styles.css' %}">
 
     <!-- Tag color styles (semantic chips, theme-independent) -->
@@ -65,7 +62,7 @@
                                 <path d="M13 2 4.5 13.5H11l-1 8.5L19.5 10H13z"/>
                             </svg>
                         </span>
-                        <span class="text-[17px] font-semibold tracking-tight text-text">PyRunner</span>
+                        <span class="text-[17px] font-semibold tracking-tight text-text">{{ instance_name }}</span>
                     </a>
                     {% include "_beta_badge.html" %}
                     {% if user.is_authenticated %}
@@ -116,6 +113,38 @@
 
                 <nav class="flex items-center gap-1.5">
                     {% if user.is_authenticated %}
+                    {# Pinned system resources — container-aware mini meters, populated + polled by JS (see headerResources script) #}
+                    <a id="headerResources" href="{% url 'cpanel:dashboard' %}" aria-label="System resources"
+                       title="System resources — open dashboard"
+                       class="hidden lg:flex items-center gap-3.5 rounded-lg border border-line px-3 h-9 mr-1.5 hover:border-faint transition-colors">
+                        <span class="flex flex-col justify-center gap-1 w-[4.5rem]">
+                            <span class="flex items-baseline justify-between leading-none">
+                                <span class="eyebrow text-faint">CPU</span>
+                                <span id="hdrCpuValue" class="font-mono tnum text-[11px] leading-none text-muted">–</span>
+                            </span>
+                            <span class="block h-[3px] rounded-full bg-line overflow-hidden">
+                                <span id="hdrCpuBar" class="block h-full w-0 rounded-full bg-ok" style="transition: width .5s ease"></span>
+                            </span>
+                        </span>
+                        <span class="flex flex-col justify-center gap-1 w-[4.5rem]">
+                            <span class="flex items-baseline justify-between leading-none">
+                                <span class="eyebrow text-faint">Mem</span>
+                                <span id="hdrMemValue" class="font-mono tnum text-[11px] leading-none text-muted">–</span>
+                            </span>
+                            <span class="block h-[3px] rounded-full bg-line overflow-hidden">
+                                <span id="hdrMemBar" class="block h-full w-0 rounded-full bg-ok" style="transition: width .5s ease"></span>
+                            </span>
+                        </span>
+                        <span class="flex flex-col justify-center gap-1 w-[4.5rem]">
+                            <span class="flex items-baseline justify-between leading-none">
+                                <span class="eyebrow text-faint">Disk</span>
+                                <span id="hdrDiskValue" class="font-mono tnum text-[11px] leading-none text-muted">–</span>
+                            </span>
+                            <span class="block h-[3px] rounded-full bg-line overflow-hidden">
+                                <span id="hdrDiskBar" class="block h-full w-0 rounded-full bg-ok" style="transition: width .5s ease"></span>
+                            </span>
+                        </span>
+                    </a>
                     <a href="{% url 'cpanel:changelog' %}" title="What's new"
                        class="w-9 h-9 grid place-items-center rounded-lg border transition-colors {% if request.resolver_match.url_name == 'changelog' %}border-ok/40 text-ok bg-ok/10{% else %}border-line text-muted hover:text-text hover:border-faint{% endif %}">
                         <svg class="w-[18px] h-[18px]" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M15.59 14.37a6 6 0 01-5.84 7.38v-4.8m5.84-2.58a14.98 14.98 0 006.16-12.12A14.98 14.98 0 009.631 8.41m5.96 5.96a14.926 14.926 0 01-5.841 2.58m-4.51 2.51a6 6 0 01-3.42-3.42 6 6 0 014.32-7.7m-1.27 9.65l2.45-2.45m-2.45 2.45l.01.01"/></svg>
@@ -247,6 +276,62 @@
                     document.body.classList.remove('overflow-hidden');
                 }
             });
+        })();
+
+        // Header resource meters — container-aware CPU/Mem/Disk pinned in the top
+        // bar (no-op on pages without the widget, e.g. auth/setup)
+        (function () {
+            var root = document.getElementById('headerResources');
+            if (!root) return;
+            var meters = {
+                cpu: [document.getElementById('hdrCpuValue'), document.getElementById('hdrCpuBar')],
+                mem: [document.getElementById('hdrMemValue'), document.getElementById('hdrMemBar')],
+                disk: [document.getElementById('hdrDiskValue'), document.getElementById('hdrDiskBar')]
+            };
+
+            function tone(percent) {
+                if (percent >= 90) return ['text-fail', 'bg-fail'];
+                if (percent >= 70) return ['text-warn', 'bg-warn'];
+                return ['text-ok', 'bg-ok'];
+            }
+
+            function paint(meter, percent) {
+                var t = tone(percent);
+                meter[0].textContent = Math.round(percent) + '%';
+                meter[0].className = 'font-mono tnum text-[11px] leading-none ' + t[0];
+                meter[1].className = 'block h-full rounded-full ' + t[1];
+                meter[1].style.width = Math.min(percent, 100) + '%';
+            }
+
+            function refresh() {
+                fetch('{% url "cpanel:system_resources_api" %}')
+                    .then(function (r) { return r.ok ? r.json() : null; })
+                    .then(function (data) {
+                        if (!data) return;
+                        paint(meters.cpu, data.cpu.percent);
+                        paint(meters.mem, data.memory.percent);
+                        paint(meters.disk, data.disk.percent);
+                        var tip = 'CPU ' + data.cpu.percent.toFixed(1) + '% · Memory ' +
+                            data.memory.used_display + ' / ' + data.memory.total_display +
+                            (data.memory.is_limit ? ' limit' : '') +
+                            ' · Storage ' + data.disk.used_display + ' / ' + data.disk.total_display;
+                        if (data.host) {
+                            tip += '\nVPS — CPU ' + data.host.cpu.percent.toFixed(1) + '% · Memory ' +
+                                data.host.memory.used_display + ' / ' + data.host.memory.total_display;
+                        }
+                        root.title = tip;
+                    })
+                    .catch(function (error) {
+                        console.error('Failed to refresh header resources:', error);
+                    });
+            }
+
+            // Refresh on return to the tab; skip polls while it's hidden.
+            document.addEventListener('visibilitychange', function () {
+                if (!document.hidden) refresh();
+            });
+            refresh();
+            setInterval(function () { if (!document.hidden) refresh(); }, 30000);
         })();
     </script>
     {% block extra_scripts %}{% endblock %}

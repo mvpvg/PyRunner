@@ -5,12 +5,12 @@ Webhook views for triggering scripts via HTTP.
 import json
 import logging
 
-from django.core.cache import cache
 from django.http import JsonResponse, HttpRequest
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
 from core.models import Script, Run
+from core.ratelimit import client_ip, rate_limit_exceeded
 from core.tasks import queue_script_run
 
 logger = logging.getLogger(__name__)
@@ -41,19 +41,18 @@ def webhook_trigger_view(request: HttpRequest, token: str) -> JsonResponse:
         - 429: Rate limit exceeded
         - 500: Failed to queue
     """
-    # Rate limiting by IP
-    client_ip = request.META.get("REMOTE_ADDR", "unknown")
-    rate_key = f"webhook_rate_{client_ip}"
-    requests_count = cache.get(rate_key, 0)
-
-    if requests_count >= WEBHOOK_RATE_LIMIT:
-        logger.warning(f"Webhook rate limit exceeded for IP: {client_ip}")
+    # Rate limiting by IP (fixed window, shared helper). client_ip honors
+    # RATELIMIT_TRUSTED_PROXY_DEPTH so a reverse-proxy deploy doesn't collapse every
+    # caller onto the proxy's IP.
+    ip = client_ip(request)
+    if rate_limit_exceeded(
+        f"webhook_rate_{ip}", WEBHOOK_RATE_LIMIT, WEBHOOK_RATE_WINDOW
+    ):
+        logger.warning(f"Webhook rate limit exceeded for IP: {ip}")
         return JsonResponse(
             {"error": "Rate limit exceeded. Try again later."},
             status=429,
         )
-
-    cache.set(rate_key, requests_count + 1, WEBHOOK_RATE_WINDOW)
 
     # Find script by token
     try:
@@ -87,10 +86,6 @@ def webhook_trigger_view(request: HttpRequest, token: str) -> JsonResponse:
         trigger_type=Run.TriggerType.API,
         code_snapshot=script.code,
     )
-
-    # Store webhook data in the run for the executor
-    # We'll pass this through a custom field or via task args
-    run._webhook_data = webhook_data
 
     # Queue for async execution
     try:

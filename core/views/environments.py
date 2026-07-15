@@ -2,7 +2,7 @@
 Environment views for the control panel.
 """
 from django.shortcuts import render, get_object_or_404, redirect
-from django.contrib.auth.decorators import login_required, user_passes_test
+from django.contrib.auth.decorators import login_required
 from django.contrib import messages
 from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.views.decorators.http import require_POST
@@ -16,18 +16,13 @@ from core.forms import (
     BulkInstallForm,
 )
 from core.services import EnvironmentService
+from core.views.decorators import superuser_required
 
-
-def superuser_required(view_func):
-    """Decorator to require superuser status.
-
-    Environments are shared, cross-workspace host infrastructure and package
-    installs run `pip` on the host (unsandboxed), so create/edit/delete and
-    package management are admin-only — matching the other infra surfaces
-    (settings.py, backup.py, plugins.py). The read-only list/detail/packages
-    views stay member-visible.
-    """
-    return user_passes_test(lambda u: u.is_superuser, login_url="auth:login")(view_func)
+# Environments are shared, cross-workspace host infrastructure and package
+# installs run ``pip`` on the host (unsandboxed), so create/edit/delete and
+# package management are ``@superuser_required`` — matching the other infra
+# surfaces (settings.py, backup.py, plugins.py). The read-only list/detail/
+# packages views stay member-visible.
 
 
 def _sanitize_filename(name: str) -> str:

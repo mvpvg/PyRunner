@@ -7,6 +7,7 @@ code injected (plus the additive PYRUNNER_AI_PROVIDER attribution var).
 """
 
 import json
+import sys
 import uuid
 from unittest import mock
 
@@ -17,6 +18,7 @@ from django.db import connection
 from django.test import TestCase, TransactionTestCase, override_settings
 from django.urls import reverse
 
+from core.executor import execute_run
 from core.forms import AIProviderForm, AISettingsForm
 from core.models import (
     AIProvider,
@@ -24,10 +26,13 @@ from core.models import (
     Environment,
     GlobalSettings,
     PROVIDER_PRESETS,
+    Run,
+    Script,
     User,
     Workspace,
     WorkspaceMembership,
 )
+from core.script_helpers import pyrunner_ai
 from core.services.claude_service import ClaudeService
 from core.services.encryption_service import EncryptionService
 
@@ -199,7 +204,7 @@ class ConnectionTestTests(TestCase):
               "num_turns": 1, "duration_ms": 100, "cost_usd": None}
 
     def test_anthropic_uses_web_search_test(self):
-        with mock.patch.object(ClaudeService, "_cli_available", return_value=True), \
+        with mock.patch.object(ClaudeService, "cli_available", return_value=True), \
                 mock.patch.object(ClaudeService, "_run_test_query",
                                   return_value=("Python 3.14", ["WebSearch"], self._usage)) as q, \
                 mock.patch.object(ClaudeService, "_run_ping_test") as ping:
@@ -214,7 +219,7 @@ class ConnectionTestTests(TestCase):
     def test_third_party_uses_ping_tool_test(self):
         from core.services.claude_service import _PING_TOOL
 
-        with mock.patch.object(ClaudeService, "_cli_available", return_value=True), \
+        with mock.patch.object(ClaudeService, "cli_available", return_value=True), \
                 mock.patch.object(ClaudeService, "_run_ping_test",
                                   return_value=("PYRUNNER-PONG", [_PING_TOOL], self._usage)) as ping:
             ok, msg = ClaudeService.test_connection_with_credentials(
@@ -228,7 +233,7 @@ class ConnectionTestTests(TestCase):
         self.assertEqual(env["ANTHROPIC_API_KEY"], "")
 
     def test_third_party_fails_when_tool_not_called(self):
-        with mock.patch.object(ClaudeService, "_cli_available", return_value=True), \
+        with mock.patch.object(ClaudeService, "cli_available", return_value=True), \
                 mock.patch.object(ClaudeService, "_run_ping_test",
                                   return_value=("hello!", [], self._usage)):
             ok, msg = ClaudeService.test_connection_with_credentials(
@@ -541,3 +546,65 @@ class DataMigrationTests(TransactionTestCase):
 
         self.assertEqual(AIProvider.objects.count(), 0)
         self.assertIsNone(GlobalSettings.get_settings().active_ai_provider_id)
+
+
+@override_settings(ENCRYPTION_KEY=_TEST_KEY)
+class HelperCredentialGateTests(TestCase):
+    """pyrunner_ai's credential gate must accept every env shape ClaudeService
+    injects — regression for review 7.1, where third-party providers were
+    rejected because ANTHROPIC_AUTH_TOKEN was not recognized."""
+
+    def _gate_under_injected_env(self):
+        env = ClaudeService.get_script_env()
+        self.assertTrue(env, "sanity: the active provider should inject an env")
+        with mock.patch.dict("os.environ", env, clear=True):
+            return pyrunner_ai._has_credentials()
+
+    def test_gate_accepts_every_provider_type(self):
+        cases = [
+            ("anthropic", {"credential": "sk-ant-test", "auth_method": "api_key"}),
+            ("anthropic", {"credential": "sk-ant-oat01-t", "auth_method": "subscription"}),
+            ("zai", {"credential": "zai-key"}),
+            ("openrouter", {"credential": "or-key"}),
+            ("ollama", {}),  # rides the preset's default token
+            ("custom", {"credential": "k", "base_url": "http://litellm:4000"}),
+        ]
+        for ptype, kwargs in cases:
+            with self.subTest(provider=ptype, auth=kwargs.get("auth_method", "")):
+                AIProvider.objects.all().delete()
+                _activate(_make_provider(ptype, **kwargs))
+                self.assertTrue(self._gate_under_injected_env())
+
+    def test_gate_rejects_empty_environment(self):
+        with mock.patch.dict("os.environ", {}, clear=True):
+            self.assertFalse(pyrunner_ai._has_credentials())
+
+    def test_gate_rejects_blanked_api_key(self):
+        # Third-party envs blank ANTHROPIC_API_KEY to "" — the empty string
+        # alone must not satisfy the gate.
+        with mock.patch.dict("os.environ", {"ANTHROPIC_API_KEY": ""}, clear=True):
+            self.assertFalse(pyrunner_ai._has_credentials())
+
+
+@override_settings(ENCRYPTION_KEY=_TEST_KEY)
+class ThirdPartyCredentialMaskingTests(TestCase):
+    """A third-party provider's credential must be masked in run output like
+    the Anthropic ones — regression for review 11.3, where
+    ANTHROPIC_AUTH_TOKEN was missing from the executor's masking set."""
+
+    @mock.patch("core.executor._validate_environment", return_value=sys.executable)
+    def test_auth_token_masked_in_run_output(self, _val):
+        _activate(_make_provider("zai", credential="zai-secret-token-12"))
+        env = Environment.objects.create(name="t", path=f"env{uuid.uuid4().hex[:10]}")
+        script = Script.objects.create(
+            name="s",
+            code="import os; print(os.environ['ANTHROPIC_AUTH_TOKEN'])",
+            environment=env,
+            timeout_seconds=60,
+        )
+        run = Run.objects.create(script=script, status=Run.Status.PENDING)
+        execute_run(run)
+        run.refresh_from_db()
+        self.assertEqual(run.status, Run.Status.SUCCESS)
+        self.assertNotIn("zai-secret-token-12", run.stdout)
+        self.assertIn("[ANTHROPIC_AUTH_TOKEN:MASKED]", run.stdout)

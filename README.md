@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?logo=docker&logoColor=white)](https://hub.docker.com/r/hasanaboulhasan/pyrunner)
-[![Version](https://img.shields.io/badge/Version-1.14.0-green.svg)](https://github.com/hassancs91/PyRunner/releases)
+[![Version](https://img.shields.io/badge/Version-1.15.0-green.svg)](https://github.com/hassancs91/PyRunner/releases)
 [![Discord](https://img.shields.io/badge/Discord-Join%20Server-5865F2?logo=discord&logoColor=white)](https://discord.gg/BjkmTn7XSd)
 
 A self-hosted Python script automation platform. Upload a script, schedule it, monitor it — nothing else to configure.
@@ -10,7 +10,7 @@ A self-hosted Python script automation platform. Upload a script, schedule it, m
 ## Features
 
 - **Script Management** — Create, edit, and organize Python scripts from your browser
-- **Flexible Scheduling** — Run scripts manually, at intervals, or daily at specific times
+- **Flexible Scheduling** — Run scripts manually, at intervals, or on a daily / weekly / monthly schedule (timezone-aware)
 - **Virtual Environments** — Isolated Python environments with custom pip packages per script
 - **Run History & Logs** — Track every execution with stdout/stderr capture
 - **Secrets Management** — Store encrypted environment variables and secrets

@@ -5,7 +5,6 @@ This module handles sending notifications when script runs complete.
 Supports email via SMTP or Resend, and webhook POST notifications.
 """
 
-import ipaddress
 import logging
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
@@ -31,10 +30,26 @@ class NotificationService:
 
     WEBHOOK_TIMEOUT = 10  # seconds
 
+    @staticmethod
+    def _subject(text: str) -> str:
+        """Email subject prefixed with the instance name (Settings → General)."""
+        from core.models import GlobalSettings
+
+        try:
+            name = (GlobalSettings.get_settings().instance_name or "").strip()
+        except Exception:
+            name = ""
+        return f"[{name or 'PyRunner'}] {text}"
+
     @classmethod
     def _is_safe_webhook_url(cls, url: str) -> bool:
         """
-        Validate webhook URL to prevent SSRF attacks.
+        Validate a webhook URL to prevent SSRF attacks.
+
+        Enforces http/https, then delegates the private/loopback/link-local IP
+        check to the shared ``is_safe_endpoint_url`` (S3), which DNS-RESOLVES the
+        hostname — so a public DNS name pointing at a private IP is caught too, not
+        just a literal private IP (the gap this function had before).
 
         Args:
             url: The webhook URL to validate
@@ -42,6 +57,8 @@ class NotificationService:
         Returns:
             bool: True if URL is safe to use
         """
+        from core.services.s3_service import is_safe_endpoint_url
+
         try:
             parsed = urlparse(url)
 
@@ -53,19 +70,13 @@ class NotificationService:
             if not hostname:
                 return False
 
-            # Block localhost variations
-            if hostname.lower() in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
+            # Block the unspecified addresses (is_safe_endpoint_url covers
+            # localhost / 127.x / ::1 / private / link-local, but not these).
+            if hostname.lower() in ("0.0.0.0", "::", "[::]"):
                 return False
 
-            # Try to parse as IP and check if private/reserved
-            try:
-                ip = ipaddress.ip_address(hostname)
-                if ip.is_private or ip.is_loopback or ip.is_reserved or ip.is_link_local:
-                    return False
-            except ValueError:
-                pass  # It's a hostname, not an IP - allow it
-
-            return True
+            is_safe, _ = is_safe_endpoint_url(url)
+            return is_safe
         except Exception:
             return False
 
@@ -80,7 +91,7 @@ class NotificationService:
         Returns:
             bool: True if notification should be sent
         """
-        from core.models import Script
+        from core.models import Run, Script
 
         script = run.script
         notify_on = script.notify_on
@@ -88,9 +99,9 @@ class NotificationService:
         if notify_on == Script.NotifyOn.NEVER:
             return False
         elif notify_on == Script.NotifyOn.SUCCESS:
-            return run.status == "success"
+            return run.status == Run.Status.SUCCESS
         elif notify_on == Script.NotifyOn.FAILURE:
-            return run.status in ["failed", "timeout"]
+            return run.status in (Run.Status.FAILED, Run.Status.TIMEOUT)
         elif notify_on == Script.NotifyOn.BOTH:
             return run.is_finished
         return False
@@ -277,7 +288,7 @@ class NotificationService:
         # Render templates
         context = cls._build_email_context(run)
         status_display = run.status.upper()
-        subject = f"[PyRunner] {run.script.name} - {status_display}"
+        subject = cls._subject(f"{run.script.name} - {status_display}")
 
         text_content = render_to_string("notifications/email/run_completed.txt", context)
         html_content = render_to_string("notifications/email/run_completed.html", context)
@@ -432,7 +443,7 @@ class NotificationService:
         if not from_email:
             raise ValueError("From email address not configured")
 
-        subject = "[PyRunner] Test Email"
+        subject = cls._subject("Test Email")
         text_content = (
             "This is a test email from PyRunner.\n\n"
             "If you receive this, your email configuration is working correctly."

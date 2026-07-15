@@ -151,18 +151,34 @@ class PluginService:
 
     @staticmethod
     def _safe_extract(zf: zipfile.ZipFile, dest_root: str) -> None:
-        """Extract members, re-checking each resolved path stays under dest_root."""
+        """Extract members, re-checking each resolved path stays under dest_root and
+        enforcing the size caps against ACTUAL bytes written — so a forged
+        uncompressed-size header (which ``_validate_zip`` trusts) can't smuggle a
+        zip-bomb past the cap here."""
         dest_root_resolved = Path(dest_root).resolve()
+        total = 0
         for info in zf.infolist():
             norm = info.filename.replace("\\", "/")
             if norm.endswith("/"):
                 continue  # directory entry; created implicitly below
             target = (dest_root_resolved / norm).resolve()
-            if not str(target).startswith(str(dest_root_resolved)):
+            # Path.is_relative_to avoids the str-prefix flaw (/tmp/foo vs /tmp/foobar).
+            if not target.is_relative_to(dest_root_resolved):
                 raise PluginInstallError(f"Blocked path traversal during extract: {norm!r}")
             target.parent.mkdir(parents=True, exist_ok=True)
+            written = 0
             with zf.open(info) as src, open(target, "wb") as out:
-                shutil.copyfileobj(src, out)
+                while True:
+                    chunk = src.read(65536)
+                    if not chunk:
+                        break
+                    written += len(chunk)
+                    if written > MAX_SINGLE_FILE:
+                        raise PluginInstallError(f"File too large in archive: {norm!r}")
+                    total += len(chunk)
+                    if total > MAX_TOTAL_UNCOMPRESSED:
+                        raise PluginInstallError("Archive is too large when unpacked.")
+                    out.write(chunk)
 
     @staticmethod
     def _read_manifest(plugin_dir: Path, slug: str) -> dict:

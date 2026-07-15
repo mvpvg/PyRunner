@@ -1,18 +1,10 @@
-"""
-URL configuration for pyrunner project.
+"""Root URL configuration.
 
-The `urlpatterns` list routes URLs to views. For more information please see:
-    https://docs.djangoproject.com/en/6.0/topics/http/urls/
-Examples:
-Function views
-    1. Add an import:  from my_app import views
-    2. Add a URL to urlpatterns:  path('', views.home, name='home')
-Class-based views
-    1. Add an import:  from other_app.views import Home
-    2. Add a URL to urlpatterns:  path('', Home.as_view(), name='home')
-Including another URLconf
-    1. Import the include() function: from django.urls import include, path
-    2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
+Routes the admin (behind a configurable slug), the setup wizard, auth, the
+cpanel console (mounted both unprefixed and under an optional
+``/cpanel/w/<workspace_id>/`` tenancy prefix), the public REST API, the internal
+loopback datastore API, the public webhook + inbound-channel endpoints, and one
+guarded mount per loaded plugin at ``/plugins/<slug>/``.
 """
 
 import importlib
@@ -59,9 +51,10 @@ urlpatterns = [
     ),
     # REST API endpoints (token auth required)
     path("api/v1/", include("core.urls.api")),
-    # Internal loopback-only datastore API (Seam 1). Signed per-run token auth;
-    # exempt from SSL redirect + setup gate (see settings). Inert in Phase A —
-    # the script helper still uses SQLite directly until the Stage 2 cutover.
+    # Internal loopback-only datastore API. Signed per-run token auth; exempt
+    # from SSL redirect + setup gate (see settings). Live path: the datastore
+    # helper calls it over loopback on no-DB-file/Postgres deploys (idle on
+    # SQLite, where the helper talks to the file directly).
     path("internal/", include("core.urls.internal")),
     # Public webhook endpoint (no auth required)
     path("webhook/<str:token>/", webhook_trigger_view, name="webhook_trigger"),

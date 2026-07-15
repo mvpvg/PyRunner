@@ -14,8 +14,10 @@ from .schedule import ScriptSchedule, ScheduleHistory
 from .settings import GlobalSettings
 from .package import PackageOperation
 from .secret import Secret, SecretGrant
+from .secret_provider import SecretProvider
 from .tag import Tag
 from .datastore import DataStore, DataStoreEntry
+from .database import Database, DatabaseGrant
 from .api_token import DataStoreAPIToken
 from .claude_usage import ClaudeUsage
 from .ai_provider import AIProvider, PROVIDER_PRESETS
@@ -38,9 +40,12 @@ __all__ = [
     "PackageOperation",
     "Secret",
     "SecretGrant",
+    "SecretProvider",
     "Tag",
     "DataStore",
     "DataStoreEntry",
+    "Database",
+    "DatabaseGrant",
     "DataStoreAPIToken",
     "ClaudeUsage",
     "AIProvider",

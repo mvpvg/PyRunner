@@ -4,9 +4,9 @@ Tenancy Stage 1 — run-stamping + the shared workspace-scoped secret resolver.
 Closes the worst leak: secret injection AND output masking go through ONE
 resolver (so they can never drift), scoped to the run's workspace; and every run
 is stamped with its script's workspace at creation (manual, scheduled, webhook —
-the request and no-request paths). A transitional rule keeps a single-workspace
-instance byte-for-byte: an un-scoped (NULL) run injects everything, and
-still-unassigned (NULL-workspace) secrets keep injecting until the Stage 3 sweep.
+the request and no-request paths). A back-compat rule keeps a single-workspace /
+pre-tenancy instance byte-for-byte: an un-scoped (NULL) run injects everything,
+and legacy (NULL-workspace) secrets created before scoping keep injecting.
 """
 
 import uuid
@@ -109,7 +109,7 @@ class RunStampingTests(TestCase):
 
     @mock.patch("core.tasks.queue_script_run")
     @mock.patch(
-        "core.services.schedule_service.ScheduleService._calculate_next_run",
+        "core.services.schedule_service.ScheduleService.calculate_next_run",
         return_value=None,
     )
     def test_scheduled_run_stamped(self, _calc, _q):

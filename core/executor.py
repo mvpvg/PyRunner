@@ -18,7 +18,7 @@ from django.conf import settings
 from django.db.models import Q
 from django.utils import timezone
 
-from core.executor_backends import LocalSubprocessBackend, RunSpec, get_run_backend
+from core.executor_backends import RunSpec, get_run_backend
 
 # Re-exported so ``from core.executor import _kill_process_tree`` keeps working
 # (TaskService.force_stop_task imports it). The implementation now lives with
@@ -26,6 +26,7 @@ from core.executor_backends import LocalSubprocessBackend, RunSpec, get_run_back
 from core.executor_backends.local import kill_process_tree as _kill_process_tree
 from core.models import GlobalSettings, Run, Secret, Workspace
 from core.services import ClaudeService, EncryptionService
+from core.services.secret_backends import SecretResolutionError
 
 logger = logging.getLogger(__name__)
 
@@ -39,14 +40,13 @@ def resolve_secrets_for_run(run) -> dict:
     The SINGLE shared resolver feeding BOTH env injection and output masking, so
     the two can never drift (no leak, no over-mask). Tenancy Stage 1.
 
-    Workspace scoping (transitional until the Stage 3 creation-sweep, chosen to
-    keep a single-workspace instance byte-for-byte):
+    Workspace scoping (back-compat rule, chosen to keep a single-workspace /
+    pre-tenancy instance byte-for-byte):
     - ``run`` is None or ``run.workspace_id`` is None ⇒ no workspace narrowing
-      (today's behavior; an un-scoped run cannot narrow).
+      (an un-scoped run cannot narrow).
     - otherwise ⇒ the run's-workspace secrets PLUS still-unassigned
-      (``workspace IS NULL``) secrets — because secret *creation* is not yet
-      workspace-scoped, so a freshly-created (NULL) secret must keep injecting on
-      a single-workspace instance.
+      (``workspace IS NULL``) secrets — legacy secrets created before scoping
+      keep injecting on a single-workspace instance.
 
     Owner / injection-mode scoping (Plugin Platform v2, WS3) layered INSIDE the
     same workspace scope so the two never fork:
@@ -102,10 +102,20 @@ def resolve_secrets_for_run(run) -> dict:
             resolved = _ws_scope(Secret.objects.filter(owner_plugin__isnull=True))
 
         for secret in resolved:
-            try:
+            if getattr(secret, "source", Secret.Source.LOCAL) == Secret.Source.EXTERNAL:
+                # External Secret Providers, fail-closed: an external value that
+                # can't be resolved raises SecretResolutionError, which propagates
+                # (past both excepts below) so execute_run fails the run pre-exec
+                # with a named error — NOT the log-and-skip local decrypts get.
                 secrets_env[secret.get_clean_name()] = secret.get_decrypted_value()
-            except Exception as e:
-                logger.error(f"Failed to decrypt secret {secret.key}: {e}")
+            else:
+                try:
+                    secrets_env[secret.get_clean_name()] = secret.get_decrypted_value()
+                except Exception as e:
+                    logger.error(f"Failed to decrypt secret {secret.key}: {e}")
+    except SecretResolutionError:
+        # Must escape the broad except below so the run fails with the named cause.
+        raise
     except Exception as e:
         logger.error(f"Failed to load secrets: {e}")
 
@@ -113,7 +123,9 @@ def resolve_secrets_for_run(run) -> dict:
 
 
 def _build_script_environment(
-    webhook_data: dict | None = None, run: "Run | None" = None
+    webhook_data: dict | None = None,
+    run: "Run | None" = None,
+    secrets: "dict | None" = None,
 ) -> dict:
     """
     Build the environment dict for script execution.
@@ -125,6 +137,10 @@ def _build_script_environment(
     Args:
         webhook_data: Optional webhook data from HTTP request
         run: Optional Run being executed (used for Claude usage attribution)
+        secrets: Optional pre-resolved secrets (from ``resolve_secrets_for_run``).
+            When omitted they are resolved here; ``execute_run`` passes the SAME dict
+            it uses for output masking so injection and masking can't drift — and the
+            values are decrypted once, not twice.
 
     Returns:
         Environment dict to pass to subprocess
@@ -139,7 +155,8 @@ def _build_script_environment(
 
     # Add secrets (overriding any existing vars with same name), scoped to the
     # run's workspace via the shared resolver.
-    secrets = resolve_secrets_for_run(run)
+    if secrets is None:
+        secrets = resolve_secrets_for_run(run)
     env.update(secrets)
 
     # Add webhook data if present
@@ -163,9 +180,9 @@ def _build_script_environment(
             env["INBOUND_REPLY_REF"] = json.dumps(inbound.get("reply_ref") or {})
             env["INBOUND_SENDER"] = json.dumps(inbound.get("sender") or {})
 
-    # Add Claude AI support (Services -> Claude AI). Injects the configured
+    # Add AI support (Services -> AI Provider). Injects the configured
     # credential + config dir so the pyrunner_ai helper works in scripts.
-    # Empty dict when Claude is disabled/unconfigured.
+    # Empty dict when AI is disabled/unconfigured.
     claude_env = ClaudeService.get_script_env()
     if claude_env:
         # Remove any stray host credential for the *other* auth method so it
@@ -558,15 +575,33 @@ def execute_run(run: Run, webhook_data: dict | None = None) -> None:
             # Build subprocess arguments
             cmd = [python_path, script_file_path]
 
-            # Build environment with secrets and webhook data injected
-            script_env = _build_script_environment(webhook_data, run=run)
-            # Masking uses the SAME resolved set as injection (shared resolver),
-            # so masking can never drift from what was injected.
-            secrets = resolve_secrets_for_run(run)
+            # Resolve secrets ONCE — the same dict feeds env injection AND output
+            # masking, so masking can never drift from what was injected (and the
+            # values are decrypted a single time, not twice).
+            try:
+                secrets = resolve_secrets_for_run(run)
+            except SecretResolutionError as e:
+                # An external secret could not be resolved (fail-closed). Fail the
+                # run BEFORE start with the named cause rather than launching it
+                # with a silently missing env var. Message carries no secret value.
+                run.status = Run.Status.FAILED
+                run.exit_code = -1
+                run.stderr = str(e)
+                logger.error("Run %s failed to resolve secrets: %s", run.id, e)
+                return  # the finally block persists this FAILED state
 
-            # Also mask the injected Claude credential in output, if any.
+            # Build environment with secrets and webhook data injected
+            script_env = _build_script_environment(webhook_data, run=run, secrets=secrets)
+
+            # Also mask the injected AI credential in output, if any. Covers
+            # every credential-bearing var ClaudeService._build_env can inject
+            # (ANTHROPIC_AUTH_TOKEN carries third-party provider keys).
             claude_env = ClaudeService.get_script_env()
-            for cred_key in ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"):
+            for cred_key in (
+                "CLAUDE_CODE_OAUTH_TOKEN",
+                "ANTHROPIC_API_KEY",
+                "ANTHROPIC_AUTH_TOKEN",
+            ):
                 if claude_env.get(cred_key):
                     secrets[cred_key] = claude_env[cred_key]
 

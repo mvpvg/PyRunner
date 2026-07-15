@@ -4,12 +4,32 @@ Service for managing django-q2 schedules.
 
 import logging
 from datetime import datetime, timedelta
+from datetime import timezone as dt_timezone
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from django.utils import timezone
 from django_q.models import Schedule as QSchedule
 
 logger = logging.getLogger(__name__)
+
+# PyRunner's own infrastructure q-schedules. They share the "pyrunner-" name
+# prefix with script schedules, so pause/resume must explicitly exclude them:
+# deleting them silently kills worker-liveness reporting, update checks,
+# scheduled backups, and auto-cleanup until the next container restart.
+# Register any new infra schedule here.
+HEARTBEAT_SCHEDULE_NAME = "pyrunner-worker-heartbeat"
+UPDATE_SCHEDULE_NAME = "pyrunner-update-check"
+BACKUP_SCHEDULE_NAME = "pyrunner-scheduled-backup"
+CLEANUP_SCHEDULE_NAME = "pyrunner-auto-cleanup"
+RESYNC_SCHEDULE_NAME = "pyrunner-schedule-resync"
+INFRA_SCHEDULE_NAMES = (
+    HEARTBEAT_SCHEDULE_NAME,
+    UPDATE_SCHEDULE_NAME,
+    BACKUP_SCHEDULE_NAME,
+    CLEANUP_SCHEDULE_NAME,
+    RESYNC_SCHEDULE_NAME,
+)
 
 
 class ScheduleService:
@@ -19,6 +39,60 @@ class ScheduleService:
     """
 
     TASK_FUNC = "core.tasks.execute_scheduled_run"
+
+    @staticmethod
+    def _schedule_tz(script_schedule) -> ZoneInfo:
+        """The schedule's IANA timezone, falling back to UTC on a bad value."""
+        from core.tz import safe_zoneinfo
+
+        return safe_zoneinfo(
+            script_schedule.timezone,
+            context=f"schedule for script {script_schedule.script_id}",
+        )
+
+    @staticmethod
+    def _local_time_to_utc(tz: ZoneInfo, hour: int, minute: int) -> tuple[int, int, int]:
+        """Convert a wall-clock time in ``tz`` to UTC cron fields.
+
+        Returns (utc_hour, utc_minute, day_shift), where day_shift (-1/0/+1)
+        says how the UTC calendar date relates to the local one — needed to
+        move weekly/monthly day fields across the midnight boundary.
+
+        Uses TODAY's UTC offset: a cron string cannot encode DST rules, so
+        around a DST transition the fire time is off by the offset delta until
+        the daily resync task (``resync_schedules_task``) rebuilds the cron.
+        """
+        local_date = datetime.now(tz).date()
+        local_dt = datetime(
+            local_date.year, local_date.month, local_date.day, hour, minute, tzinfo=tz
+        )
+        utc_dt = local_dt.astimezone(dt_timezone.utc)
+        return utc_dt.hour, utc_dt.minute, (utc_dt.date() - local_date).days
+
+    @staticmethod
+    def _shift_month_days(days: list, day_shift: int) -> list[str]:
+        """Shift day-of-month values across the UTC midnight boundary.
+
+        Exact for days 2-28 either way. Two corners cron can't express exactly:
+        - day 1 shifting backward -> 'l' (croniter's last-day-of-month), exact;
+        - a trailing day shifting forward past 31 -> '1' (the 1st of the next
+          month). Trailing days (29-31) that shift forward can also land on a
+          day the month doesn't have and skip that month — the local day
+          didn't exist there either for 31, but 29/30 may underfire in short
+          months. Accepted: the alternative (no day shift) fires on the wrong
+          local day for EVERY month.
+        """
+        shifted = set()
+        for d in days:
+            s = d + day_shift
+            if s < 1:
+                shifted.add("l")
+            elif s > 31:
+                shifted.add("1")
+            else:
+                shifted.add(str(s))
+        nums = sorted((v for v in shifted if v != "l"), key=int)
+        return nums + (["l"] if "l" in shifted else [])
 
     @classmethod
     def sync_schedule(cls, script_schedule) -> list[int]:
@@ -67,7 +141,7 @@ class ScheduleService:
 
         # Update the ScriptSchedule with new IDs and next_run
         script_schedule.q_schedule_ids = q_schedule_ids
-        script_schedule.next_run = cls._calculate_next_run(script_schedule)
+        script_schedule.next_run = cls.calculate_next_run(script_schedule)
         script_schedule.save(update_fields=["q_schedule_ids", "next_run"])
 
         return q_schedule_ids
@@ -96,12 +170,15 @@ class ScheduleService:
         Returns list of created schedule IDs.
         """
         q_schedule_ids = []
+        tz = cls._schedule_tz(script_schedule)
 
         for time_str in script_schedule.daily_times:
             hour, minute = map(int, time_str.split(":"))
 
-            # Create cron expression: minute hour * * *
-            cron_expr = f"{minute} {hour} * * *"
+            # Convert the schedule-local time to UTC (django-q evaluates cron
+            # in TIME_ZONE=UTC). A date shift is irrelevant for daily crons.
+            utc_hour, utc_minute, _ = cls._local_time_to_utc(tz, hour, minute)
+            cron_expr = f"{utc_minute} {utc_hour} * * *"
 
             q_schedule = QSchedule.objects.create(
                 name=f"pyrunner-{script_schedule.script.id}-{time_str.replace(':', '')}",
@@ -130,18 +207,24 @@ class ScheduleService:
         if not script_schedule.weekly_days or not script_schedule.weekly_times:
             return q_schedule_ids
 
-        # Convert Python weekdays (0=Mon) to cron weekdays (0=Sun in standard cron, but django-q uses 1=Mon)
-        # django-q2 uses standard cron: 0=Sunday, 1=Monday, ..., 6=Saturday
-        # Our model uses: 0=Monday, ..., 6=Sunday
-        # Convert: add 1 and mod 7 (Mon=0 -> 1, Sun=6 -> 0)
-        cron_days = [(d + 1) % 7 for d in script_schedule.weekly_days]
-        days_str = ",".join(str(d) for d in sorted(cron_days))
+        tz = cls._schedule_tz(script_schedule)
 
         for time_str in script_schedule.weekly_times:
             hour, minute = map(int, time_str.split(":"))
 
+            # Convert the schedule-local time to UTC; when it crosses UTC
+            # midnight the weekday moves with it (Mon 00:30 Tokyo = Sun UTC).
+            utc_hour, utc_minute, day_shift = cls._local_time_to_utc(tz, hour, minute)
+
+            # Model weekdays are 0=Monday..6=Sunday; standard cron (django-q2)
+            # is 0=Sunday..6=Saturday. Shift for the date boundary, then map.
+            cron_days = sorted(
+                ((d + day_shift) % 7 + 1) % 7 for d in script_schedule.weekly_days
+            )
+            days_str = ",".join(str(d) for d in cron_days)
+
             # Cron format: minute hour * * day_of_week
-            cron_expr = f"{minute} {hour} * * {days_str}"
+            cron_expr = f"{utc_minute} {utc_hour} * * {days_str}"
 
             q_schedule = QSchedule.objects.create(
                 name=f"pyrunner-{script_schedule.script.id}-weekly-{time_str.replace(':', '')}",
@@ -171,13 +254,20 @@ class ScheduleService:
         if not script_schedule.monthly_days or not script_schedule.monthly_times:
             return q_schedule_ids
 
-        days_str = ",".join(str(d) for d in sorted(script_schedule.monthly_days))
+        tz = cls._schedule_tz(script_schedule)
 
         for time_str in script_schedule.monthly_times:
             hour, minute = map(int, time_str.split(":"))
 
+            # Convert the schedule-local time to UTC; day-of-month values move
+            # with a date shift (see _shift_month_days for the corner cases).
+            utc_hour, utc_minute, day_shift = cls._local_time_to_utc(tz, hour, minute)
+            days_str = ",".join(
+                cls._shift_month_days(script_schedule.monthly_days, day_shift)
+            )
+
             # Cron format: minute hour day_of_month * *
-            cron_expr = f"{minute} {hour} {days_str} * *"
+            cron_expr = f"{utc_minute} {utc_hour} {days_str} * *"
 
             q_schedule = QSchedule.objects.create(
                 name=f"pyrunner-{script_schedule.script.id}-monthly-{time_str.replace(':', '')}",
@@ -211,20 +301,26 @@ class ScheduleService:
         return count
 
     @classmethod
-    def _calculate_next_run(cls, script_schedule) -> Optional[datetime]:
-        """Calculate the next scheduled run time based on schedule configuration."""
+    def calculate_next_run(cls, script_schedule) -> Optional[datetime]:
+        """Calculate the next scheduled run time based on schedule configuration.
+
+        Daily/weekly/monthly arithmetic happens in the schedule's timezone
+        (mirroring how the crons fire), then converts to UTC for storage.
+        """
         from core.models import ScriptSchedule
 
         if not script_schedule.is_active:
             return None
 
-        now = timezone.now()
-
         if script_schedule.run_mode == ScriptSchedule.RunMode.INTERVAL:
-            # Next run is interval_minutes from now
-            return now + timedelta(minutes=script_schedule.interval_minutes)
+            # Next run is interval_minutes from now (timezone-independent)
+            return timezone.now() + timedelta(minutes=script_schedule.interval_minutes)
 
-        elif script_schedule.run_mode == ScriptSchedule.RunMode.DAILY:
+        # Wall-clock "now" in the schedule's timezone; candidates are built in
+        # local time and converted back to UTC on return.
+        now = timezone.now().astimezone(cls._schedule_tz(script_schedule))
+
+        if script_schedule.run_mode == ScriptSchedule.RunMode.DAILY:
             # Calculate next occurrence from daily_times
             if not script_schedule.daily_times:
                 return None
@@ -239,7 +335,7 @@ class ScheduleService:
                     candidate += timedelta(days=1)
                 candidates.append(candidate)
 
-            return min(candidates) if candidates else None
+            return min(candidates).astimezone(dt_timezone.utc) if candidates else None
 
         elif script_schedule.run_mode == ScriptSchedule.RunMode.WEEKLY:
             # Calculate next occurrence from weekly_days and weekly_times
@@ -268,7 +364,7 @@ class ScheduleService:
 
                     candidates.append(candidate)
 
-            return min(candidates) if candidates else None
+            return min(candidates).astimezone(dt_timezone.utc) if candidates else None
 
         elif script_schedule.run_mode == ScriptSchedule.RunMode.MONTHLY:
             # Calculate next occurrence from monthly_days and monthly_times
@@ -321,14 +417,17 @@ class ScheduleService:
 
                     candidates.append(candidate)
 
-            return min(candidates) if candidates else None
+            return min(candidates).astimezone(dt_timezone.utc) if candidates else None
 
         return None
 
     @classmethod
     def pause_all_schedules(cls, user=None) -> int:
         """
-        Pause all schedules globally by deleting all django-q2 Schedule objects.
+        Pause all script schedules globally by deleting their django-q2
+        Schedule objects. The infrastructure schedules (heartbeat, update
+        check, backup, cleanup) are untouched — pausing is about user scripts,
+        not about turning off worker-liveness reporting or backups.
         Returns count of deleted schedules.
         """
         from core.models import ScriptSchedule, GlobalSettings
@@ -340,8 +439,14 @@ class ScheduleService:
         settings.schedules_paused_by = user
         settings.save()
 
-        # Delete all PyRunner-related schedules
-        count = QSchedule.objects.filter(name__startswith="pyrunner-").delete()[0]
+        # Delete all script schedules (by prefix, so orphaned q-schedules
+        # whose ids were lost from a failed sync are swept up too) — but
+        # never the infra schedules that share the prefix.
+        count = (
+            QSchedule.objects.filter(name__startswith="pyrunner-")
+            .exclude(name__in=INFRA_SCHEDULE_NAMES)
+            .delete()[0]
+        )
 
         # Clear all q_schedule_ids
         ScriptSchedule.objects.update(q_schedule_ids=[], next_run=None)
@@ -352,8 +457,10 @@ class ScheduleService:
     @classmethod
     def resume_all_schedules(cls) -> int:
         """
-        Resume all schedules by recreating django-q2 Schedule objects.
-        Returns count of created schedules.
+        Resume all script schedules by recreating their django-q2 Schedule
+        objects, and re-ensure the infrastructure schedules (heartbeat, update
+        check, backup, cleanup) in case they were lost.
+        Returns count of created script schedules.
         """
         from core.models import ScriptSchedule, GlobalSettings
 
@@ -376,6 +483,21 @@ class ScheduleService:
             ids = cls.sync_schedule(schedule)
             count += len(ids)
 
+        # Belt-and-braces: re-ensure the infrastructure schedules. A pause on
+        # an older PyRunner deleted them (shared "pyrunner-" prefix) and
+        # nothing recreated them until the next container restart — resume is
+        # the natural heal point. All of these are idempotent, and backup/
+        # cleanup stay off unless their settings enable them.
+        from core.services.backup_schedule_service import BackupScheduleService
+        from core.services.retention_service import RetentionService
+
+        cls.ensure_heartbeat_schedule()
+        cls.ensure_update_check_schedule()
+        cls.ensure_resync_schedule()
+        BackupScheduleService.sync_schedule()
+        if settings.auto_cleanup_enabled:
+            RetentionService.enable_auto_cleanup()
+
         logger.info(f"Resumed all schedules - created {count} django-q2 schedules")
         return count
 
@@ -388,7 +510,6 @@ class ScheduleService:
         Returns:
             bool: True if schedule was created, False if it already exists
         """
-        HEARTBEAT_SCHEDULE_NAME = "pyrunner-worker-heartbeat"
         HEARTBEAT_TASK_FUNC = "core.tasks.worker_heartbeat_task"
 
         if QSchedule.objects.filter(name=HEARTBEAT_SCHEDULE_NAME).exists():
@@ -414,7 +535,6 @@ class ScheduleService:
         Returns:
             bool: True if schedule was created, False if it already exists
         """
-        UPDATE_SCHEDULE_NAME = "pyrunner-update-check"
         UPDATE_TASK_FUNC = "core.tasks.check_for_updates_task"
 
         if QSchedule.objects.filter(name=UPDATE_SCHEDULE_NAME).exists():
@@ -428,4 +548,31 @@ class ScheduleService:
             next_run=timezone.now(),  # Runs on first worker tick, then daily
         )
         logger.info("Created update check schedule")
+        return True
+
+    @classmethod
+    def ensure_resync_schedule(cls) -> bool:
+        """
+        Ensure the daily schedule-resync schedule exists.
+
+        Crons for timezone-aware schedules are converted to UTC with the
+        offset valid at sync time; the resync task rebuilds them daily so a
+        DST transition drifts fire times for at most a day.
+
+        Returns:
+            bool: True if schedule was created, False if it already exists
+        """
+        RESYNC_TASK_FUNC = "core.tasks.resync_schedules_task"
+
+        if QSchedule.objects.filter(name=RESYNC_SCHEDULE_NAME).exists():
+            return False
+
+        QSchedule.objects.create(
+            name=RESYNC_SCHEDULE_NAME,
+            func=RESYNC_TASK_FUNC,
+            schedule_type=QSchedule.DAILY,
+            repeats=-1,  # Run forever
+            next_run=timezone.now(),  # Runs on first worker tick, then daily
+        )
+        logger.info("Created schedule-resync schedule")
         return True

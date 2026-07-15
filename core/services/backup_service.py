@@ -14,6 +14,8 @@ from django.db import transaction
 from django.utils import timezone
 
 from core.models import (
+    Database,
+    DatabaseGrant,
     DataStore,
     DataStoreEntry,
     Environment,
@@ -24,6 +26,8 @@ from core.models import (
     Script,
     ScriptSchedule,
     Secret,
+    SecretProvider,
+    Tag,
     User,
     Workspace,
     WorkspaceMembership,
@@ -48,7 +52,45 @@ class BackupService:
     # scripts. Backward compatible: a pre-1.3.0 backup has none of these, and
     # restore defaults them to NULL owner / ``injection_mode='all'`` / no grants
     # (= today's behavior), so old backups never hit a UNIQUE violation.
-    BACKUP_VERSION = "1.3.0"
+    # 1.4.0 — close the fields added after the format was first designed: weekly/
+    # monthly schedule fields (``weekly_days``/``weekly_times``/``monthly_days``/
+    # ``monthly_times`` — a weekly/monthly schedule previously restored as an empty
+    # shell) and, on scripts, ``tags`` (embedded ``{name, color}``; get_or_create
+    # by the globally-unique name on restore), ``archived_at``/``archived_by`` (soft
+    # delete), and ``isolation_mode`` (sandbox opt-in). Backward compatible: a
+    # pre-1.4.0 backup omits all of these and restore defaults them (empty lists /
+    # not-archived / ``isolation_mode='inherit'``).
+    #
+    # 1.5.0 — Databases (managed Postgres): a ``databases`` array with row
+    # metadata (schema/role names preserved verbatim — a dump only replays into
+    # the same schema name), the Fernet-encrypted role password (same same-key
+    # requirement as secrets), embedded per-database script ``grants``, and —
+    # when the data server is reachable and pg_dump is installed — a plain-SQL
+    # ``dump_sql`` of each ready schema (``dump_skipped_reason`` records why one
+    # is absent). Restore re-provisions and replays; with no data server
+    # attached, databases are skipped with a warning. Backward compatible: a
+    # pre-1.5.0 backup has no ``databases`` key.
+    #
+    # 1.6.0 — External Secret Providers: a ``secret_providers`` array (one row per
+    # configured external secrets backend — Vault/AWS/Infisical/Doppler/custom —
+    # with ``credentials_encrypted`` carried VERBATIM, the same same-ENCRYPTION_KEY
+    # stance as secrets) and three new fields on each secret: ``source``
+    # (local/external), ``provider_name`` (the referenced profile BY NAME — ids
+    # differ across instances, names are the stable join key), and ``external_ref``.
+    # On restore, providers are upserted by name (never delete existing — they are
+    # instance credential config, like the AI-provider rows below) and external
+    # secrets relink to them by name. Backward compatible: a pre-1.6.0 backup has no
+    # ``secret_providers`` key and no ``source`` on its secrets → every secret
+    # defaults to ``source="local"`` (today's path, byte-for-byte).
+    #
+    # Deliberately NOT in the backup (documented so the omission reads as a choice,
+    # not an oversight): S3/backup credentials, AI provider rows + settings,
+    # reCAPTCHA keys, ``admin_url_slug``, worker/heartbeat settings, the Channels
+    # subsystem (channels + members + messages), and public API tokens. These are
+    # deployment-/secret-bound to a specific instance — restoring them onto a
+    # different host would be wrong (stale endpoints) or a credential-leak vector —
+    # so they are reconfigured per instance rather than carried in a portable dump.
+    BACKUP_VERSION = "1.6.0"
     MAX_BACKUP_SIZE_MB = 100
 
     # Backup format constants
@@ -96,6 +138,7 @@ class BackupService:
             "scripts": cls._export_scripts(),
             "script_schedules": cls._export_schedules(),
             "schedule_history": cls._export_schedule_history(),
+            "secret_providers": cls._export_secret_providers(),
             "secrets": cls._export_secrets(),
         }
 
@@ -114,6 +157,8 @@ class BackupService:
         else:
             backup_data["datastores"] = []
 
+        backup_data["databases"] = cls._export_databases()
+
         return backup_data
 
     @classmethod
@@ -123,8 +168,6 @@ class BackupService:
         return {
             "instance_name": settings_obj.instance_name,
             "timezone": settings_obj.timezone,
-            "date_format": settings_obj.date_format,
-            "time_format": settings_obj.time_format,
             "email_backend": settings_obj.email_backend,
             "smtp_host": settings_obj.smtp_host,
             "smtp_port": settings_obj.smtp_port,
@@ -195,7 +238,13 @@ class BackupService:
     def _export_scripts(cls) -> List[dict]:
         """Export scripts with all fields."""
         scripts = []
-        for script in Script.objects.select_related("environment", "created_by").all().order_by("created_at"):
+        queryset = (
+            Script.objects.select_related("environment", "created_by", "archived_by")
+            .prefetch_related("tags", "secret_grants")
+            .all()
+            .order_by("created_at")
+        )
+        for script in queryset:
             scripts.append({
                 "id": str(script.id),
                 "name": script.name,
@@ -206,6 +255,7 @@ class BackupService:
                 "owner_plugin": script.owner_plugin,
                 "owner_key": script.owner_key,
                 "injection_mode": script.injection_mode,
+                "isolation_mode": script.isolation_mode,
                 "timeout_seconds": script.timeout_seconds,
                 "is_enabled": script.is_enabled,
                 "webhook_token": script.webhook_token,
@@ -215,6 +265,17 @@ class BackupService:
                 "notify_webhook_enabled": script.notify_webhook_enabled,
                 "retention_days_override": script.retention_days_override,
                 "retention_count_override": script.retention_count_override,
+                # Tags are instance-global (unique name). Exported as {name, color}
+                # and re-attached via get_or_create-by-name on restore, so a restore
+                # onto an instance that already has the tag reuses it.
+                "tags": [
+                    {"name": t.name, "color": t.color}
+                    for t in script.tags.all()
+                ],
+                # Soft-delete (archive) state. archived_by follows the same
+                # simplified user mapping as created_by on restore.
+                "archived_at": cls._serialize_datetime(script.archived_at),
+                "archived_by_email": script.archived_by.email if script.archived_by else None,
                 # Embedded per-script secret grants (selected-mode injection).
                 # Imported after secrets+scripts exist; old backups have none.
                 "secret_grants": [
@@ -239,6 +300,10 @@ class BackupService:
                 "run_mode": schedule.run_mode,
                 "interval_minutes": schedule.interval_minutes,
                 "daily_times": schedule.daily_times,
+                "weekly_days": schedule.weekly_days,
+                "weekly_times": schedule.weekly_times,
+                "monthly_days": schedule.monthly_days,
+                "monthly_times": schedule.monthly_times,
                 "timezone": schedule.timezone,
                 "is_active": schedule.is_active,
                 "created_at": cls._serialize_datetime(schedule.created_at),
@@ -264,16 +329,49 @@ class BackupService:
         return history
 
     @classmethod
+    def _export_secret_providers(cls) -> List[dict]:
+        """Export external secret-provider profiles (External Secret Providers).
+
+        Instance-global config (no ``workspace_id``), like the AI-provider rows —
+        but unlike those, these ARE carried, so external secrets round-trip. The
+        credential blob is exported VERBATIM: it is Fernet-encrypted with the
+        instance ``ENCRYPTION_KEY``, which the backup already pins via
+        ``encryption_key_hash`` — so it is decryptable on any target restoring with
+        the same key (and unreadable, as intended, without it).
+        """
+        providers = []
+        for p in SecretProvider.objects.all().order_by("created_at"):
+            providers.append({
+                "id": str(p.id),
+                "provider_type": p.provider_type,
+                "name": p.name,
+                "config": p.config,
+                "credentials_encrypted": p.credentials_encrypted,
+                "cache_ttl": p.cache_ttl,
+                "on_error": p.on_error,
+                "last_tested_at": cls._serialize_datetime(p.last_tested_at),
+                "created_at": cls._serialize_datetime(p.created_at),
+                "updated_at": cls._serialize_datetime(p.updated_at),
+            })
+        return providers
+
+    @classmethod
     def _export_secrets(cls) -> List[dict]:
         """Export secrets (keep encrypted values)."""
         secrets = []
-        for secret in Secret.objects.select_related("created_by").all().order_by("created_at"):
+        for secret in Secret.objects.select_related("created_by", "provider").all().order_by("created_at"):
             secrets.append({
                 "id": str(secret.id),
                 "key": secret.key,
                 "workspace_id": str(secret.workspace_id) if secret.workspace_id else None,
                 "owner_plugin": secret.owner_plugin,
                 "owner_key": secret.owner_key,
+                # External Secret Providers: a local secret carries its Fernet
+                # value; an external secret carries no value (encrypted_value is
+                # blank) and instead points at a provider BY NAME + a reference.
+                "source": secret.source,
+                "provider_name": secret.provider.name if secret.provider_id else None,
+                "external_ref": secret.external_ref,
                 "encrypted_value": secret.encrypted_value,
                 "description": secret.description,
                 "created_at": cls._serialize_datetime(secret.created_at),
@@ -356,6 +454,56 @@ class BackupService:
                 "entries": entries,
             })
         return datastores
+
+    @classmethod
+    def _export_databases(cls) -> List[dict]:
+        """Export managed databases: row metadata + grants + a pg_dump of each
+        READY schema when the data server and client binaries allow it.
+
+        Best-effort per database: a failed/unavailable dump records its reason
+        in ``dump_skipped_reason`` instead of failing the whole backup — the
+        metadata (and everything else in the backup) is still exact.
+        """
+        from core.services.database_service import DatabaseService
+
+        databases = []
+        for db in Database.objects.select_related("created_by").all().order_by("created_at"):
+            dump_sql, skip_reason = None, ""
+            if not DatabaseService.is_configured():
+                skip_reason = "no data server attached (PYRUNNER_DATA_DB_URL unset)"
+            elif not db.is_ready:
+                skip_reason = f"database status is '{db.status}'"
+            else:
+                try:
+                    dump_sql = DatabaseService.dump_schema(db)
+                except Exception as e:
+                    skip_reason = str(e)
+
+            databases.append({
+                "id": str(db.id),
+                "name": db.name,
+                "workspace_id": str(db.workspace_id) if db.workspace_id else None,
+                "owner_plugin": db.owner_plugin,
+                "owner_key": db.owner_key,
+                # Preserved verbatim: the dump's statements are qualified with
+                # this schema name, so restore must recreate it 1:1.
+                "schema_name": db.schema_name,
+                "role_name": db.role_name,
+                # Fernet-encrypted — same same-ENCRYPTION_KEY requirement the
+                # backup already imposes for secrets (encryption_key_hash).
+                "encrypted_password": db.encrypted_password,
+                "description": db.description,
+                "grants": [
+                    {"script_id": str(g.script_id), "active": g.active}
+                    for g in db.grants.all()
+                ],
+                "dump_sql": dump_sql,
+                "dump_skipped_reason": skip_reason,
+                "created_at": cls._serialize_datetime(db.created_at),
+                "updated_at": cls._serialize_datetime(db.updated_at),
+                "created_by_email": db.created_by.email if db.created_by else None,
+            })
+        return databases
 
     @classmethod
     def _calculate_encryption_key_hash(cls) -> str:
@@ -595,6 +743,7 @@ class BackupService:
             "scripts": len(backup_data.get("scripts", [])),
             "workspaces": len(backup_data.get("workspaces", [])),
             "environments": len(backup_data.get("environments", [])),
+            "secret_providers": len(backup_data.get("secret_providers", [])),
             "secrets": len(backup_data.get("secrets", [])),
             "runs": len(backup_data.get("runs", [])),
             "schedules": len(backup_data.get("script_schedules", [])),
@@ -643,6 +792,8 @@ class BackupService:
             }
         """
         try:
+            warnings: List[str] = []
+
             # Delete existing data (reverse dependency order)
             Run.objects.all().delete()
             PackageOperation.objects.all().delete()
@@ -653,6 +804,12 @@ class BackupService:
             Environment.objects.all().delete()
             DataStoreEntry.objects.all().delete()
             DataStore.objects.all().delete()
+            # Databases are full-replace like everything else, but their data
+            # lives on the data server — deprovision each (best-effort; a
+            # failure becomes a warning, never an aborted restore) before the
+            # rows go, or the schemas would be orphaned server-side.
+            warnings.extend(cls._cleanup_existing_databases())
+            Database.objects.all().delete()
             # Note: We don't delete User objects to preserve authentication
             # GlobalSettings is singleton, so we update rather than delete
 
@@ -676,7 +833,13 @@ class BackupService:
 
             user_map = cls._import_users(backup_data.get("users", []), current_user)
             env_map = cls._import_environments(backup_data.get("environments", []), user_map, current_user, ws_map, default_ws)
-            cls._import_secrets(backup_data.get("secrets", []), user_map, current_user, ws_map, default_ws)
+            # Secret providers first (external secrets relink to them by name).
+            # Upsert, not full-replace: an older backup omits the key → no-op, and
+            # existing provider credentials are never wiped by an unrelated restore.
+            providers_restored = cls._import_secret_providers(backup_data.get("secret_providers", []))
+            warnings.extend(
+                cls._import_secrets(backup_data.get("secrets", []), user_map, current_user, ws_map, default_ws)
+            )
             script_map = cls._import_scripts(backup_data.get("scripts", []), env_map, user_map, current_user, ws_map, default_ws)
             # Grants reference both Secrets (imported above) and Scripts (just
             # imported), so they go in their own pass. Old backups carry none.
@@ -689,6 +852,11 @@ class BackupService:
 
             cls._import_package_operations(backup_data.get("package_operations", []), env_map, user_map, current_user)
             ds_map = cls._import_datastores(backup_data.get("datastores", []), user_map, current_user, ws_map, default_ws)
+            databases_restored, db_warnings = cls._import_databases(
+                backup_data.get("databases", []), script_map, user_map,
+                current_user, ws_map, default_ws,
+            )
+            warnings.extend(db_warnings)
 
             # Regenerate django-q2 schedules
             schedules_created = cls._regenerate_all_schedules()
@@ -696,18 +864,20 @@ class BackupService:
             counts = {
                 "environments": len(env_map),
                 "scripts": len(script_map),
+                "secret_providers": providers_restored,
                 "secrets": Secret.objects.count(),
                 "runs": Run.objects.count() if restore_runs else 0,
                 "schedules": ScriptSchedule.objects.count(),
                 "schedules_regenerated": schedules_created,
                 "datastores": len(ds_map),
                 "datastore_entries": DataStoreEntry.objects.count(),
+                "databases": databases_restored,
             }
 
-            return {"success": True, "counts": counts, "errors": []}
+            return {"success": True, "counts": counts, "errors": [], "warnings": warnings}
 
         except Exception as e:
-            return {"success": False, "counts": {}, "errors": [str(e)]}
+            return {"success": False, "counts": {}, "errors": [str(e)], "warnings": []}
 
     @classmethod
     def _import_global_settings(cls, data: dict) -> None:
@@ -715,8 +885,8 @@ class BackupService:
         settings_obj = GlobalSettings.get_settings()
         settings_obj.instance_name = data.get("instance_name", "PyRunner")
         settings_obj.timezone = data.get("timezone", "UTC")
-        settings_obj.date_format = data.get("date_format", "YYYY-MM-DD")
-        settings_obj.time_format = data.get("time_format", "24h")
+        # date_format/time_format were removed (stored but never displayed);
+        # old backups may still carry the keys — ignored harmlessly on restore.
         settings_obj.email_backend = data.get("email_backend", "disabled")
         settings_obj.smtp_host = data.get("smtp_host", "")
         settings_obj.smtp_port = data.get("smtp_port", 587)
@@ -834,10 +1004,60 @@ class BackupService:
         return env_map
 
     @classmethod
-    def _import_secrets(cls, secrets_data: List[dict], user_map: dict, current_user, ws_map: dict, default_ws) -> None:
-        """Import secrets (encrypted values unchanged)."""
+    def _import_secret_providers(cls, providers_data: List[dict]) -> int:
+        """Import external secret-provider profiles, keyed by NAME.
+
+        Upsert (not full-replace): the profile ``name`` is unique and stable across
+        instances — the join key both for idempotent import and for relinking
+        external secrets — so an existing profile of the same name is updated to
+        match the backup (credentials VERBATIM; the backup's key-hash gate
+        guarantees they decrypt on the target). Nothing is deleted: providers are
+        instance credential config, and an older archive omits this key entirely,
+        so a restore never wipes providers the backup simply predates.
+
+        Returns the number of profiles imported.
+        """
+        for p in providers_data:
+            SecretProvider.objects.update_or_create(
+                name=p["name"],
+                defaults={
+                    "provider_type": p["provider_type"],
+                    "config": p.get("config", {}),
+                    "credentials_encrypted": p.get("credentials_encrypted", ""),
+                    "cache_ttl": p.get("cache_ttl", 300),
+                    "on_error": p.get("on_error", SecretProvider.OnError.FAIL),
+                    "last_tested_at": cls._deserialize_datetime(p.get("last_tested_at")),
+                },
+            )
+        return len(providers_data)
+
+    @classmethod
+    def _import_secrets(cls, secrets_data: List[dict], user_map: dict, current_user, ws_map: dict, default_ws) -> List[str]:
+        """Import secrets (encrypted values unchanged).
+
+        External Secret Providers: an external secret relinks to its provider BY
+        NAME (providers are imported first, so a live lookup resolves them — same
+        by-key pattern as ``_import_secret_grants``). A pre-1.6.0 backup has no
+        ``source`` → defaults to ``local``, today's path byte-for-byte. An external
+        secret whose provider name isn't present is imported UNLINKED with a warning
+        (fail-closed: it surfaces for the user to re-point, rather than silently
+        becoming an empty local secret). Returns any such warnings.
+        """
+        warnings: List[str] = []
         for secret_data in secrets_data:
             created_by = user_map.get(secret_data.get("created_by_email"), current_user)
+
+            source = secret_data.get("source", Secret.Source.LOCAL)
+            provider = None
+            if source == Secret.Source.EXTERNAL:
+                provider_name = secret_data.get("provider_name")
+                provider = SecretProvider.objects.filter(name=provider_name).first()
+                if provider is None:
+                    warnings.append(
+                        f"Secret '{secret_data.get('key')}': external provider "
+                        f"'{provider_name}' was not found — imported unlinked; "
+                        "re-point it to a provider in the console."
+                    )
 
             Secret.objects.create(
                 id=secret_data["id"],  # Preserve UUID
@@ -845,12 +1065,16 @@ class BackupService:
                 workspace=cls._resolve_workspace(secret_data.get("workspace_id"), ws_map, default_ws),
                 owner_plugin=secret_data.get("owner_plugin"),
                 owner_key=secret_data.get("owner_key"),
-                encrypted_value=secret_data["encrypted_value"],
+                source=source,
+                provider=provider,
+                external_ref=secret_data.get("external_ref", ""),
+                encrypted_value=secret_data.get("encrypted_value", ""),
                 description=secret_data.get("description", ""),
                 created_at=cls._deserialize_datetime(secret_data.get("created_at")),
                 updated_at=cls._deserialize_datetime(secret_data.get("updated_at")),
                 created_by=created_by,
             )
+        return warnings
 
     @classmethod
     def _import_scripts(cls, scripts_data: List[dict], env_map: dict, user_map: dict, current_user, ws_map: dict, default_ws) -> dict:
@@ -865,6 +1089,16 @@ class BackupService:
             if not env:
                 continue  # Skip if environment not found
 
+            # Archive state: only resolve archived_by when the script is actually
+            # archived (pre-1.4.0 backups omit both keys → not archived).
+            archived_at = cls._deserialize_datetime(script_data.get("archived_at"))
+            archived_by_email = script_data.get("archived_by_email")
+            archived_by = (
+                user_map.get(archived_by_email, current_user)
+                if archived_at and archived_by_email
+                else None
+            )
+
             script = Script.objects.create(
                 id=old_id,  # Preserve UUID
                 name=script_data["name"],
@@ -875,6 +1109,7 @@ class BackupService:
                 owner_plugin=script_data.get("owner_plugin"),
                 owner_key=script_data.get("owner_key"),
                 injection_mode=script_data.get("injection_mode", "all"),
+                isolation_mode=script_data.get("isolation_mode", Script.IsolationMode.INHERIT),
                 timeout_seconds=script_data.get("timeout_seconds", 300),
                 is_enabled=script_data.get("is_enabled", False),
                 webhook_token=script_data.get("webhook_token"),
@@ -884,10 +1119,22 @@ class BackupService:
                 notify_webhook_enabled=script_data.get("notify_webhook_enabled", False),
                 retention_days_override=script_data.get("retention_days_override"),
                 retention_count_override=script_data.get("retention_count_override"),
+                archived_at=archived_at,
+                archived_by=archived_by,
                 created_at=cls._deserialize_datetime(script_data.get("created_at")),
                 updated_at=cls._deserialize_datetime(script_data.get("updated_at")),
                 created_by=created_by,
             )
+
+            # Re-attach tags by their globally-unique name (created if absent).
+            # Tags aren't wiped by restore, so an existing tag is reused as-is.
+            for tag_data in script_data.get("tags", []):
+                tag, _ = Tag.objects.get_or_create(
+                    name=tag_data["name"],
+                    defaults={"color": tag_data.get("color", Tag.Color.GRAY)},
+                )
+                script.tags.add(tag)
+
             script_map[old_id] = script
 
         return script_map
@@ -933,6 +1180,10 @@ class BackupService:
                 run_mode=schedule_data.get("run_mode", "manual"),
                 interval_minutes=schedule_data.get("interval_minutes"),
                 daily_times=schedule_data.get("daily_times", []),
+                weekly_days=schedule_data.get("weekly_days", []),
+                weekly_times=schedule_data.get("weekly_times", []),
+                monthly_days=schedule_data.get("monthly_days", []),
+                monthly_times=schedule_data.get("monthly_times", []),
                 timezone=schedule_data.get("timezone", "UTC"),
                 is_active=schedule_data.get("is_active", True),
                 q_schedule_ids=[],  # Will be regenerated
@@ -1048,6 +1299,124 @@ class BackupService:
                 )
 
         return ds_map
+
+    @classmethod
+    def _cleanup_existing_databases(cls) -> List[str]:
+        """Deprovision the current instance's databases before full-replace.
+
+        Best-effort: an unreachable data server (or none attached) yields a
+        warning about orphaned schemas instead of aborting the restore — core
+        data must remain restorable even when the data server is down.
+        """
+        from core.services.database_service import DatabaseService
+
+        warnings = []
+        existing = list(Database.objects.all())
+        if not existing:
+            return warnings
+        if not DatabaseService.is_configured():
+            warnings.append(
+                f"{len(existing)} existing database(s) removed from PyRunner "
+                "without server cleanup (no data server attached) — their "
+                "schemas/roles may remain on the old server."
+            )
+            return warnings
+        for db in existing:
+            try:
+                DatabaseService.deprovision(db)
+            except Exception as e:
+                warnings.append(
+                    f"Database '{db.name}': server cleanup failed ({e}) — its "
+                    f"schema '{db.schema_name}' may remain on the data server."
+                )
+        return warnings
+
+    @classmethod
+    def _import_databases(
+        cls, databases_data: List[dict], script_map: dict, user_map: dict,
+        current_user, ws_map: dict, default_ws,
+    ) -> Tuple[int, List[str]]:
+        """Recreate managed databases: row → provision → replay dump → grants.
+
+        Schema/role names are restored VERBATIM (the dump's statements are
+        qualified with the schema name), so this expects a fresh target — a
+        clashing schema is reconciled by the idempotent provision, and a dump
+        replay onto non-empty state fails loudly into a warning. With no data
+        server attached, all databases are skipped with one warning.
+        """
+        from core.services.database_service import (
+            DatabaseProvisionError,
+            DatabaseService,
+        )
+
+        warnings: List[str] = []
+        if not databases_data:
+            return 0, warnings
+        if not DatabaseService.is_configured():
+            warnings.append(
+                f"Skipped {len(databases_data)} database(s): no data server "
+                "attached (PYRUNNER_DATA_DB_URL). Attach one and restore the "
+                "backup again to recover them."
+            )
+            return 0, warnings
+
+        restored = 0
+        for data in databases_data:
+            name = data.get("name", "?")
+            try:
+                db = Database.objects.create(
+                    id=data["id"],  # Preserve UUID
+                    name=name,
+                    workspace=cls._resolve_workspace(data.get("workspace_id"), ws_map, default_ws),
+                    owner_plugin=data.get("owner_plugin"),
+                    owner_key=data.get("owner_key"),
+                    schema_name=data["schema_name"],
+                    role_name=data["role_name"],
+                    encrypted_password=data.get("encrypted_password", ""),
+                    description=data.get("description", ""),
+                    status=Database.STATUS_PROVISIONING,
+                    created_by=user_map.get(data.get("created_by_email"), current_user),
+                )
+            except Exception as e:
+                warnings.append(f"Database '{name}': row import failed: {e}")
+                continue
+
+            restored += 1
+            # Grants first — they are pure rows, restorable even if the server
+            # half fails below (the script then just waits on a Retry).
+            for grant in data.get("grants", []):
+                script = script_map.get(grant.get("script_id"))
+                if script is not None:
+                    DatabaseGrant.objects.get_or_create(
+                        script=script, database=db,
+                        defaults={"active": grant.get("active", True)},
+                    )
+
+            try:
+                DatabaseService.provision(db)
+            except DatabaseProvisionError as e:
+                warnings.append(
+                    f"Database '{name}': provisioning failed ({e}) — left in "
+                    "error status; fix the data server and use Retry on its page."
+                )
+                continue
+
+            dump_sql = data.get("dump_sql")
+            if dump_sql:
+                try:
+                    DatabaseService.restore_schema_dump(db, dump_sql)
+                except DatabaseProvisionError as e:
+                    warnings.append(
+                        f"Database '{name}': data replay failed ({e}) — the "
+                        "database is provisioned but its tables may be missing "
+                        "or partial."
+                    )
+            elif data.get("dump_skipped_reason"):
+                warnings.append(
+                    f"Database '{name}': the backup carried no data "
+                    f"({data['dump_skipped_reason']}) — restored empty."
+                )
+        return restored, warnings
 
     @classmethod
     def _regenerate_all_schedules(cls) -> int:

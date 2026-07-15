@@ -56,8 +56,8 @@ class Environment(models.Model):
     name = models.CharField(max_length=100)
     description = models.TextField(blank=True)
 
-    # Tenancy seam (Phase A): nullable, backfilled to the default workspace.
-    # Environments stay SHARED infrastructure; this is organizational metadata.
+    # Tenancy: nullable + backfilled to the default workspace (organizational
+    # metadata only — environments stay SHARED infrastructure across workspaces).
     workspace = models.ForeignKey(
         "core.Workspace",
         on_delete=models.SET_NULL,

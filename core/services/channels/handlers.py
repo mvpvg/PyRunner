@@ -1,8 +1,8 @@
 """
 Inbound handler registry — what an inbound message *does*.
 
-Phase 2 ships the ``script`` handler (chat → run a script). ``pyai`` is added by
-PLAN_pyai.md; ``agent`` is RESERVED for the future Agents plan. A handler takes
+The ``script`` handler (chat → run a script) and ``pyai`` (the read-only Py AI
+assistant) are both live; ``agent`` is RESERVED for the future Agents plan. A handler takes
 ``(channel, InboundMessage)`` and returns an ``OutboundMessage`` to reply
 synchronously, or ``None`` when the reply happens asynchronously — the script
 handler queues a Run that replies later via ``pyrunner_notify.reply()``.

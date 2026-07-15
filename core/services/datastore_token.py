@@ -1,15 +1,17 @@
 """
 Stateless per-run token for the internal DataStore API (Seam 1).
 
-Phase A lays the *seam*: the internal datastore endpoint exists and is proven,
-but the script-side helper still talks to SQLite directly (byte-for-byte with
-today). The full cutover happens in Stage 2 alongside Postgres.
+This is a live path, not a seam: on deployments with no local DB file (Postgres),
+the script-side ``pyrunner_datastore`` helper reaches the internal datastore
+endpoint over loopback HTTP, authenticated by this per-run token. (SQLite
+deployments keep reading the DB file directly via ``PYRUNNER_DB_PATH`` — the
+byte-for-byte original path — and never mint a token.)
 
 The token is a signed (HMAC-SHA256 over ``SECRET_KEY``) payload that authorizes
 datastore access for one run. It is stateless on purpose: the django-q worker
-mints it (Stage 2) and the gunicorn web process validates it, two separate
-processes that share only ``SECRET_KEY`` via the environment — so no shared DB
-row, cache, or in-memory state is required, and the token expires on its own.
+mints it and the gunicorn web process validates it, two separate processes that
+share only ``SECRET_KEY`` via the environment — so no shared DB row, cache, or
+in-memory state is required, and the token expires on its own.
 
 Both mint and verify run inside Django (worker / web); the script subprocess is
 just an opaque courier of the string, so the dependency-light helper never needs
@@ -32,7 +34,7 @@ def mint_datastore_token(run_id) -> str:
 
     Args:
         run_id: The Run's id (UUID or str). Stored in the signed payload so the
-            endpoint can attribute/scope access in Stage 2.
+            endpoint can attribute/scope access to that run.
 
     Returns:
         An opaque, URL-safe signed token string.

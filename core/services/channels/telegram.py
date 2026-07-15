@@ -1,10 +1,10 @@
 """
 Telegram provider — Bot API outbound + the getUpdates chat_id helper.
 
-Phase 1: outbound only. The ``discover_chat_ids`` helper solves the bootstrap
-problem (you only learn a chat_id once someone messages the bot) — it works
-*because* no webhook is registered yet (getUpdates and webhooks are mutually
-exclusive). Phase 2 registers the webhook and parse/verify get implemented.
+The ``discover_chat_ids`` helper solves the bootstrap problem (you only learn a
+chat_id once someone messages the bot) — it works *because* no webhook is
+registered (getUpdates and webhooks are mutually exclusive). Inbound is wired:
+the webhook registration and parse/verify are implemented below.
 """
 
 import hmac

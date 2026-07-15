@@ -11,7 +11,6 @@ WORKDIR /app
 # hood, so Node and the CLI must be available on PATH for the AI integration.
 ENV NODE_MAJOR=20
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc \
     curl \
     ca-certificates \
     gnupg \
@@ -21,9 +20,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
     && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_${NODE_MAJOR}.x nodistro main" \
         > /etc/apt/sources.list.d/nodesource.list \
-    && apt-get update && apt-get install -y --no-install-recommends nodejs \
+    # postgres client (pg_dump/psql) for Databases backup/restore — PGDG, not
+    # Debian's, so the client is never older than the data server it dumps
+    # (pg_dump refuses servers newer than itself; v17 covers 9.2→17).
+    && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+        | gpg --dearmor -o /etc/apt/keyrings/pgdg.gpg \
+    && echo "deb [signed-by=/etc/apt/keyrings/pgdg.gpg] http://apt.postgresql.org/pub/repos/apt $(. /etc/os-release && echo "$VERSION_CODENAME")-pgdg main" \
+        > /etc/apt/sources.list.d/pgdg.list \
+    && apt-get update && apt-get install -y --no-install-recommends nodejs postgresql-client-17 \
     && npm install -g @anthropic-ai/claude-code \
     && claude --version \
+    && pg_dump --version \
     && apt-get purge -y --auto-remove gnupg \
     && rm -rf /var/lib/apt/lists/*
 

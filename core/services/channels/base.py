@@ -5,8 +5,8 @@ RunBackend seam). Adding a provider is additive: define a class, register it.
 The contracts ``InboundMessage`` / ``OutboundMessage`` are ORM-free dataclasses
 (same discipline as the SDK's ``RunView``) — the seam every surface produces or
 consumes: run notifications, script replies, Py AI, and the future Agents plan.
-Phase 1 uses ``OutboundMessage`` + ``send``/``test_connection``; the inbound
-methods are stubs wired in Phase 2.
+Providers implement the outbound methods (``send``/``test_connection``) and the
+inbound methods (webhook parse + signature verify); both directions are live.
 """
 
 from __future__ import annotations

@@ -213,7 +213,8 @@ never bypasses the run/sandbox seams.
 
 ```python
 from core.plugins.api import (
-    EnvironmentAPI, ScriptAPI, SecretAPI, DataStoreAPI, ScheduleAPI, API_VERSION,
+    EnvironmentAPI, ScriptAPI, SecretAPI, DataStoreAPI, DatabaseAPI, ScheduleAPI,
+    API_VERSION,
 )
 
 OWNER = "my_flows"   # your slug — passes ownership through every call
@@ -314,6 +315,41 @@ def backup_stop(request):
 injected, masked env vars (clean names), opens datastores with the normal
 `from pyrunner_datastore import DataStore`, and can read `PYRUNNER_OWNER_PLUGIN`.
 
+### Databases — real SQL (API 2.2)
+
+When keyed JSON isn't enough (joins, indexes, aggregates over many rows), a
+plugin can provision a **managed database**: a real PostgreSQL schema + role on
+the instance's attached data server, isolated by Postgres itself. Auto-named
+`"<owner>:<key>"` like DataStores.
+
+```python
+from core.plugins.api import DatabaseAPI, ScriptAPI
+
+OWNER = "my_flows"
+
+dbs = DatabaseAPI(OWNER)
+if dbs.is_available():                       # data server attached?
+    db = dbs.provision("metrics")            # idempotent; real schema + role
+    dbs.grant(script, db)                    # the worker script may now connect
+```
+
+- **Requires a data server.** The instance must set `PYRUNNER_DATA_DB_URL`;
+  `provision()` raises `DatabaseProvisionError` otherwise. Check
+  `is_available()` and degrade gracefully (or fall back to a DataStore) when
+  your plugin can work without SQL.
+- **Explicit grants only.** There is no `'all'` mode: without
+  `DatabaseAPI(OWNER).grant(script, db)` the worker's `pyrunner_db` calls get a
+  `ValueError`.
+- **In the worker script**: `import pyrunner_db` then
+  `pyrunner_db.connect("my_flows:metrics")` — a plain psycopg connection whose
+  `search_path` is preset to your schema. `connect()` needs `psycopg[binary]`
+  in the script's *environment*; `pyrunner_db.dsn(...)` is stdlib-only.
+- **In your plugin's views** (dashboard reading its tables):
+  `DatabaseAPI(OWNER).dsn("metrics")` returns the scoped DSN (or `None` when
+  missing/not ready) — connect with psycopg from the web process. Treat it
+  like a password; the role can't leave your schema either way.
+- **Declare it** in `plugin.json`: `"provisions": {"databases": 1, ...}`.
+
 ---
 
 ## Ownership & scoped secrets
@@ -341,14 +377,19 @@ This is purely additive: existing scripts stay `'all'`, byte-for-byte.
 
 ---
 
-## Persistence — DataStores, not models
+## Persistence — DataStores or Databases, never models
 
-Plugins persist via **owned DataStores** (a named store × keyed JSON entries),
-addressed through `DataStoreAPI`. This is deliberate: no plugin model means no
-plugin migration, which means no plugin DDL can ever reach a core table. A real
-"relational mini-app" is a sign the work belongs in core or a separate service —
-it is out of scope for a plugin, and the doctor will reject `models.py`/
-`migrations/`.
+Plugins persist via **owned DataStores** (a named store × keyed JSON entries,
+through `DataStoreAPI`) or — when the data is genuinely relational — an **owned
+Database** (a real Postgres schema, through `DatabaseAPI`, API 2.2). What stays
+deliberate: no plugin Django models means no plugin migration, so plugin DDL can
+never reach a core table — a Database's DDL lives inside its own Postgres
+schema, walled off by the database engine itself. The doctor still rejects
+`models.py`/`migrations/`.
+
+Rule of thumb: config, state, and small keyed blobs → DataStore (zero-config,
+works everywhere). Rows you query, join, or aggregate → Database (requires the
+instance to attach a data server).
 
 The runtime `from pyrunner_datastore import DataStore` API is engine-portable
 (SQLite direct, or a loopback API on Postgres) and unchanged.

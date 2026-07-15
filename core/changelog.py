@@ -8,6 +8,95 @@ When you cut a release, bump ``pyrunner/version.py`` and add an entry here.
 
 CHANGELOG = [
     {
+        "version": "1.15.0",
+        "date": "July 15, 2026",
+        "headline": (
+            "PyRunner scripts get real SQL: managed PostgreSQL databases with "
+            "tables, joins, and transactions — plus secrets you can pull live "
+            "from Vault, AWS, Infisical, or Doppler instead of storing them here."
+        ),
+        "changes": [
+            {
+                "tag": "Added",
+                "title": "Databases — real SQL for scripts & plugins",
+                "body": (
+                    "Scripts and plugins can now use a real PostgreSQL database "
+                    "— tables, joins, indexes, transactions, the whole Python DB "
+                    "ecosystem — alongside the simple key-value Data Stores. "
+                    "Point PyRunner at a data server with a single environment "
+                    "variable (it can sit next to a SQLite core), then provision "
+                    "databases from the console: each one is its own isolated "
+                    "Postgres schema with a dedicated login role, so a script "
+                    "granted access gets full SQL inside its own space and cannot "
+                    "reach anything else. Scripts connect with the new "
+                    "pyrunner_db helper; plugins provision their own through the "
+                    "SDK. A read-only explorer lets you browse tables, export "
+                    "CSV, and watch live activity — sessions, slow queries, and "
+                    "sizes — and everything is included in backups."
+                ),
+            },
+            {
+                "tag": "Added",
+                "title": "External Secret Providers — bring your own vault",
+                "body": (
+                    "A secret no longer has to live inside PyRunner. Save a "
+                    "provider profile for HashiCorp Vault / OpenBao, AWS Secrets "
+                    "Manager, Infisical, Doppler, or any HTTP JSON endpoint, then "
+                    "point a secret at it with a reference like kv/myapp#API_KEY. "
+                    "The real value is fetched fresh at run time, masked in logs "
+                    "exactly like a local secret, and never written to disk — so "
+                    "rotating it in your vault is picked up automatically, and "
+                    "grants, workspaces, and the plugin SDK keep working "
+                    "unchanged. If a value can't be fetched the run fails fast "
+                    "with a clear error, with an optional last-known-good "
+                    "fallback for automation that must not stall."
+                ),
+            },
+            {
+                "tag": "Improved",
+                "title": "Container-aware resource stats + pinned meters",
+                "body": (
+                    "When PyRunner runs in Docker, the dashboard's CPU and "
+                    "memory now show the container's own usage — matching "
+                    "docker stats — with the full host/VPS as a secondary line, "
+                    "and memory measured against the container's limit when one "
+                    "is set. Every console page also gains a compact CPU / Mem / "
+                    "Disk mini-meter in the header, updated live and "
+                    "color-coded, so you can keep an eye on load from anywhere "
+                    "in the app."
+                ),
+            },
+            {
+                "tag": "Fixed",
+                "title": "Scheduling, workers & Postgres correctness",
+                "body": (
+                    "Scheduled jobs now run in the timezone you configured "
+                    "instead of always UTC (daylight-saving handled), “Pause all "
+                    "schedules” no longer knocks out the built-in maintenance "
+                    "jobs, and “Restart workers” actually restarts them. Weekly "
+                    "and monthly schedules show up in upcoming runs and backups. "
+                    "Password-strength rules now apply everywhere a password is "
+                    "set, rate limiting is shared across workers and can't be "
+                    "starved, and a range of PostgreSQL-specific rough edges "
+                    "(datastore writes, the database-size card, setup status) "
+                    "are smoothed out."
+                ),
+            },
+            {
+                "tag": "Security",
+                "title": "Provider-key masking, SSRF & plugin-ZIP hardening",
+                "body": (
+                    "AI now works with every configured provider and "
+                    "third-party provider keys are masked in run output; webhook "
+                    "notification URLs that resolve to internal addresses are "
+                    "blocked (SSRF); and plugin ZIP installs enforce their size "
+                    "limits against real extracted bytes with hardened "
+                    "path-traversal checks."
+                ),
+            },
+        ],
+    },
+    {
         "version": "1.14.0",
         "date": "July 15, 2026",
         "headline": (

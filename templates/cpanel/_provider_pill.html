@@ -1,0 +1,4 @@
+{% comment %}
+Provider pill for an external-sourced secret (External Secret Providers). Renders
+nothing for local rows. Include with: {% include "cpanel/_provider_pill.html" with obj=secret %}
+{% endcomment %}{% if obj.source == "external" %}<span title="Resolved live from the “{{ obj.provider.name }}” provider ({{ obj.provider.provider_type }})" class="inline-flex items-center gap-1.5 px-2 py-0.5 text-xs rounded-full bg-accent/10 text-accent border border-accent/20 font-medium align-middle"><span class="w-1.5 h-1.5 rounded-full bg-accent"></span>{{ obj.provider.name|default:obj.provider.provider_type|default:"external" }}</span>{% endif %}

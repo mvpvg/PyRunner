@@ -96,13 +96,13 @@ class TaskService:
                 "type": "system",
             }
 
-            # Try to decode payload to get task details
-            try:
-                payload = pickle.loads(q.payload)
-                task_info["name"] = payload.get("name", q.key)
-                task_info["func"] = payload.get("func", "Unknown")
-            except Exception:
-                task_info["name"] = q.key
+            # Decode the task payload for its name/func. django-q SIGNS+pickles
+            # the payload, so a raw pickle.loads nearly always throws — use the
+            # shared SignedPackage-aware decoder (returns {} on failure, so the
+            # name falls back to the key and func stays "Unknown").
+            payload = cls._decode_ormq_payload(q.payload)
+            task_info["name"] = payload.get("name", q.key)
+            task_info["func"] = payload.get("func", "Unknown")
 
             # Try to find linked Run
             try:
@@ -657,14 +657,6 @@ class TaskService:
     @classmethod
     def _format_duration(cls, seconds: float | None) -> str:
         """Format duration in seconds to human-readable string."""
-        if seconds is None:
-            return "-"
-        if seconds < 60:
-            return f"{seconds:.1f}s"
-        minutes = int(seconds // 60)
-        secs = seconds % 60
-        if minutes < 60:
-            return f"{minutes}m {secs:.0f}s"
-        hours = minutes // 60
-        mins = minutes % 60
-        return f"{hours}h {mins}m"
+        from core.formatting import format_duration
+
+        return format_duration(seconds)

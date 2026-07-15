@@ -100,8 +100,10 @@ class ActiveWorkspaceMiddleware:
     to the user's default workspace *in place* — no redirect — so a
     single-workspace instance is byte-for-byte unchanged.
 
-    Stage 0: this only attaches ``request.workspace``; no scoped query filters by
-    it yet. It runs as a ``process_view`` hook (last in MIDDLEWARE), so
+    It attaches ``request.workspace``; the tenant-scoped views and services then
+    filter their queries by it (``Model.objects.for_workspace(request.workspace)``
+    for lists, ``get_object_or_404(Model, …, workspace=request.workspace)`` for
+    detail). It runs as a ``process_view`` hook (last in MIDDLEWARE), so
     ``request.user`` is already populated and the captured URL kwarg is available.
     """
 
@@ -145,3 +147,52 @@ class ActiveWorkspaceMiddleware:
 
         request.workspace = workspace
         return None
+
+
+class TimezoneMiddleware:
+    """Activate the instance display timezone for every request.
+
+    ``GlobalSettings.timezone`` is the admin-chosen display timezone; activating
+    it makes Django render every template datetime in that zone (storage stays
+    UTC via USE_TZ). Defensive: before setup, or on a DB hiccup, we deactivate
+    — i.e. fall back to UTC — rather than break the page.
+
+    The settings lookup is memoized per-process for a few seconds so the
+    middleware adds ~zero queries on hot paths; a changed timezone shows up
+    within TTL_SECONDS (display-only, so brief staleness is harmless).
+    """
+
+    TTL_SECONDS = 5.0
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+        self._tz = None  # ZoneInfo, or None = deactivate (UTC)
+        self._expires = 0.0
+
+    def _current_tz(self):
+        import time
+
+        now = time.monotonic()
+        if now >= self._expires:
+            try:
+                from core.models import GlobalSettings
+                from core.tz import safe_zoneinfo
+
+                self._tz = safe_zoneinfo(
+                    GlobalSettings.get_settings().timezone,
+                    context="instance display timezone",
+                )
+            except Exception:
+                self._tz = None  # DB not ready (setup) — render in UTC
+            self._expires = now + self.TTL_SECONDS
+        return self._tz
+
+    def __call__(self, request):
+        from django.utils import timezone
+
+        tz = self._current_tz()
+        if tz is not None:
+            timezone.activate(tz)
+        else:
+            timezone.deactivate()
+        return self.get_response(request)

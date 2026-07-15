@@ -118,7 +118,7 @@ def pyai_settings_view(request: HttpRequest) -> HttpResponse:
         if form.cleaned_data.get("pyai_enabled") and not (
             settings.claude_enabled and ClaudeService.is_configured()
         ):
-            messages.error(request, "Configure Claude (Services → Claude AI) before enabling Py AI.")
+            messages.error(request, "Configure an AI provider (Services → AI Provider) before enabling Py AI.")
         else:
             form.save(settings)
             messages.success(request, "Py AI settings saved.")

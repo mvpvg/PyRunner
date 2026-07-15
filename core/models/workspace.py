@@ -1,14 +1,15 @@
 """
-Workspace model — the tenancy seam (FOUNDATIONS Seam 1).
+Workspace model — the tenancy boundary (FOUNDATIONS Seam 1).
 
-Phase A lands the SEAM ONLY: this model + a nullable ``workspace`` FK on the
-scoped models + a default-workspace backfill. There is deliberately NO
-query-scoping sweep and NO UI yet — every existing query is unchanged and a
-single-workspace instance behaves exactly like today. The eventual multi-tenant
-flip becomes a scoping sweep, not a schema rewrite.
+A Workspace owns the scoped resources (scripts, runs, schedules, secrets,
+datastores, environments, channels) via a nullable ``workspace`` FK; queries
+narrow to the active workspace through ``WorkspaceScopedManager`` and the
+additive ``/w/<id>/`` URL prefix. The FK is nullable and backfilled to a default
+workspace so upgrades are lossless and a single-workspace instance behaves
+exactly like a pre-tenancy one.
 
-``WorkspaceMembership`` (user × workspace × role) pairs with future RBAC and is
-intentionally out of scope here.
+``WorkspaceMembership`` (user × workspace × role) is the sole source of "which
+workspaces a user may act in" and drives RBAC (roles gate management actions).
 """
 
 import uuid
@@ -18,12 +19,11 @@ from django.db import models
 
 
 class WorkspaceScopedQuerySet(models.QuerySet):
-    """QuerySet for the six scoped models, adding the tenancy sweep's primitive.
+    """QuerySet for the scoped models, adding the tenancy scoping primitive.
 
     ``Model.objects.for_workspace(ws)`` is the single, greppable way every
-    list/service query narrows to the active workspace once the Stage 3 sweep
-    lands. Added now (unused) so the eventual flip is mechanical. Managers are
-    not serialized into migrations (``use_in_migrations`` defaults False), so
+    list/service query narrows to the active workspace. Managers are not
+    serialized into migrations (``use_in_migrations`` defaults False), so
     attaching this is a behavior-only, drift-free change.
     """
 
@@ -38,9 +38,10 @@ WorkspaceScopedManager = models.Manager.from_queryset(WorkspaceScopedQuerySet)
 class Workspace(models.Model):
     """A tenancy boundary that scoped resources belong to.
 
-    In Phase A there is exactly one — the default workspace the backfill creates
-    — and nothing filters by it. It exists so new code can be written
-    workspace-aware and the rows already carry the column.
+    A single-workspace instance has exactly one — the default workspace the
+    backfill creates — and every scoped query still narrows by it, so behavior
+    matches a pre-tenancy instance. Additional workspaces isolate their
+    resources from one another.
     """
 
     # Per-workspace execution-isolation policy (sandbox Stage 3). Null = inherit
@@ -138,11 +139,10 @@ class WorkspaceMembership(models.Model):
     """A user's membership in a workspace, with a role (RBAC, Decision 4).
 
     This is the *only* source of "which workspaces a user may act in" — there is
-    no per-user ownership on the scoped resources. The Phase-A backfill seeds one
-    membership per existing user in the default workspace; the security sweep
-    keys isolation off membership, and roles gate management actions in a later
-    stage. ``role`` is present now so the column never needs a later migration,
-    but Stage 0 does not yet enforce it.
+    no per-user ownership on the scoped resources. The backfill seeds one
+    membership per existing user in the default workspace; isolation keys off
+    membership, and ``role`` gates management actions (see ``can_manage`` /
+    ``MANAGE_ROLES``).
     """
 
     ROLE_OWNER = "owner"

@@ -28,6 +28,7 @@ class CoreConfig(AppConfig):
         """Run after migrations are complete to set up recurring schedules."""
         self._ensure_heartbeat_schedule()
         self._ensure_update_check_schedule()
+        self._ensure_resync_schedule()
 
     def _register_membership_signal(self):
         """Ensure a new User always gets a default-workspace membership.
@@ -113,5 +114,18 @@ class CoreConfig(AppConfig):
                 from core.services.schedule_service import ScheduleService
 
                 ScheduleService.ensure_update_check_schedule()
+        except Exception:
+            pass  # Database not ready yet
+
+    def _ensure_resync_schedule(self):
+        """Ensure the daily schedule-resync (DST heal) schedule exists."""
+        try:
+            # Only run if database tables exist (not during migrations)
+            from django.db import connection
+
+            if "django_q_schedule" in connection.introspection.table_names():
+                from core.services.schedule_service import ScheduleService
+
+                ScheduleService.ensure_resync_schedule()
         except Exception:
             pass  # Database not ready yet

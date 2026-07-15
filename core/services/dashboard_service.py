@@ -115,11 +115,16 @@ class DashboardService:
 
         now = timezone.now()
 
+        # A non-null future ``next_run`` is the authoritative "will fire" signal for
+        # every recurring mode: ``sync_schedule`` computes it for interval/daily/
+        # weekly/monthly and clears it to NULL for manual (or paused) schedules. An
+        # earlier ``run_mode__in=[INTERVAL, DAILY]`` filter here predated the weekly/
+        # monthly modes and silently hid them from this widget — the ``next_run``
+        # check already excludes manual, so it was both redundant and lossy.
         schedules = ScriptSchedule.objects.filter(
             next_run__isnull=False,
             next_run__gt=now,
             is_active=True,
-            run_mode__in=[ScriptSchedule.RunMode.INTERVAL, ScriptSchedule.RunMode.DAILY],
         )
         if workspace is not None:
             schedules = schedules.filter(script__workspace=workspace)

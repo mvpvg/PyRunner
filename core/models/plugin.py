@@ -186,6 +186,7 @@ class Plugin(models.Model):
             ("scripts", "script"),
             ("secrets", "secret"),
             ("datastores", "data store"),
+            ("databases", "database"),
             ("schedules", "schedule"),
         ):
             n = p.get(key)

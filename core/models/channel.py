@@ -9,9 +9,8 @@ to a different handler. See docs/PLAN_channels.md.
 Credentials live encrypted ON this row (a Fernet JSON blob), NOT in the Secret
 namespace: scripts send *through* a channel server-side and never see raw tokens.
 
-Phase 1 wires OUTBOUND only. The inbound_* columns are included now (additive,
-defaulted) so Phase 2 (webhook + handlers + approval inbox) needs no schema churn
-— the same forward-compatible discipline as WorkspaceMembership.role.
+Both directions are wired: OUTBOUND sends, and the inbound_* columns drive the
+INBOUND pipeline (webhook + handlers + approval inbox).
 """
 
 import hashlib
@@ -47,7 +46,8 @@ class Channel(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
 
-    # Tenancy seam (matches Secret/DataStore): nullable, backfilled to default ws.
+    # Tenancy (matches Secret/DataStore): nullable + backfilled to the default
+    # workspace; queries scope through WorkspaceScopedManager (.for_workspace).
     workspace = models.ForeignKey(
         "core.Workspace",
         on_delete=models.SET_NULL,
@@ -95,7 +95,9 @@ class Channel(models.Model):
         max_length=20, choices=InboundAccess.choices, default=InboundAccess.APPROVAL,
     )
     daily_reply_cap = models.PositiveIntegerField(
-        default=0, help_text="Max handler replies per day (0 = unlimited). Cost fuse.",
+        default=0,
+        help_text="Max outbound messages per day — handler replies plus "
+        "script-initiated sends (0 = unlimited). Cost fuse.",
     )
 
     # ---- status ----

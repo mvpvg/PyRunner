@@ -1,3 +1,22 @@
+/* Self-hosted fonts (OFL) — no external CDN, so the console works on air-gapped
+   installs and never leaks a viewer's IP to Google Fonts. Variable woff2, latin
+   subset; licenses in ../fonts/*-OFL.txt. System fonts remain the fallback stack
+   (see tailwind.config.js) if a face fails to load. */
+@font-face {
+    font-family: 'Inter';
+    font-style: normal;
+    font-weight: 100 900;
+    font-display: swap;
+    src: url('../../fonts/inter-latin-variable.woff2') format('woff2');
+}
+@font-face {
+    font-family: 'JetBrains Mono';
+    font-style: normal;
+    font-weight: 100 800;
+    font-display: swap;
+    src: url('../../fonts/jetbrains-mono-latin-variable.woff2') format('woff2');
+}
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;

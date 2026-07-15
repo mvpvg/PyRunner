@@ -22,8 +22,8 @@ class Script(models.Model):
     name = models.CharField(max_length=200)
     description = models.TextField(blank=True)
 
-    # Tenancy seam (Phase A): nullable, backfilled to the default workspace.
-    # No query-scoping yet — present so rows already carry the column.
+    # Tenancy: nullable + backfilled to the default workspace for upgrade-safety;
+    # queries scope through WorkspaceScopedManager (.for_workspace).
     workspace = models.ForeignKey(
         "core.Workspace",
         on_delete=models.SET_NULL,
@@ -59,7 +59,7 @@ class Script(models.Model):
     # the literal pre-v2 behavior: inject every user (owner-NULL) secret in the
     # workspace. 'selected' is opt-in (set by the SDK for plugin-owned scripts):
     # inject only granted + same-owner + explicitly-global secrets. NOTE: this is
-    # SECRET scoping, NOT the sandbox ``isolation_mode`` field above.
+    # SECRET scoping, NOT the sandbox ``isolation_mode`` field below.
     class InjectionMode(models.TextChoices):
         ALL = "all", "All secrets (default)"
         SELECTED = "selected", "Selected secrets only"

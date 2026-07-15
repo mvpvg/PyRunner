@@ -7,8 +7,9 @@ import logging
 from datetime import timedelta
 
 from django.shortcuts import render, redirect
-from django.contrib.auth.decorators import login_required, user_passes_test
+from django.contrib.auth.decorators import login_required
 from django.contrib import messages
+from django.core.exceptions import ValidationError
 from django.core.paginator import Paginator
 from django.db.models import Count, Sum
 from django.db.models.functions import TruncDate
@@ -16,18 +17,27 @@ from django.utils import timezone
 from django.views.decorators.http import require_POST
 from django.http import HttpRequest, HttpResponse, JsonResponse
 
-from core.models import AIProvider, GlobalSettings, ClaudeUsage, PROVIDER_PRESETS
-from core.forms import S3SettingsForm, AISettingsForm, AIProviderForm
+from django.db.models import ProtectedError
+
+from core.models import (
+    AIProvider,
+    GlobalSettings,
+    ClaudeUsage,
+    PROVIDER_PRESETS,
+    SecretProvider,
+)
+from core.forms import S3SettingsForm, AISettingsForm, AIProviderForm, SecretProviderForm
 from core.services.s3_service import S3Service
 from core.services.claude_service import ClaudeService
 from core.services.encryption_service import EncryptionService
+from core.services.secret_backends import (
+    SecretResolutionError,
+    get_backend,
+    list_backends,
+)
+from core.views.decorators import superuser_required
 
 logger = logging.getLogger(__name__)
-
-
-def superuser_required(view_func):
-    """Decorator to require superuser status for S3 configuration."""
-    return user_passes_test(lambda u: u.is_superuser, login_url="auth:login")(view_func)
 
 
 @login_required
@@ -56,6 +66,42 @@ def services_view(request: HttpRequest) -> HttpResponse:
     ]
     presets_data = {str(key): value for key, value in PROVIDER_PRESETS.items()}
 
+    # External Secret Providers (Stage 2). Instance-global profiles, like AI
+    # providers. The backend registry drives the type dropdown + dynamic fields;
+    # the plain-dict mirrors feed the template JS (edit prefill, field rendering).
+    secret_providers = list(SecretProvider.objects.all())
+    secret_counts = _secret_counts_by_provider()
+    backend_labels = {b.provider_key: (b.label or b.provider_key) for b in list_backends()}
+    for p in secret_providers:
+        # Attach display helpers for the table (Django templates can't index a
+        # dict by a variable key).
+        p.secret_count = secret_counts.get(p.id, 0)
+        p.type_label = backend_labels.get(p.provider_type, p.provider_type)
+    secret_providers_data = [
+        {
+            "id": str(p.id),
+            "name": p.name,
+            "provider_type": p.provider_type,
+            "cache_ttl": p.cache_ttl,
+            "on_error": p.on_error,
+            "config": p.config or {},
+            "has_credentials": bool(p.credentials_encrypted),
+            "secret_count": p.secret_count,
+        }
+        for p in secret_providers
+    ]
+    secret_backends_data = [
+        {
+            "provider_key": b.provider_key,
+            "label": b.label or b.provider_key,
+            "docs_url": b.docs_url,
+            "fields": b.fields,
+            "ref_placeholder": b.ref_placeholder,
+            "ref_help": b.ref_help,
+        }
+        for b in list_backends()
+    ]
+
     return render(
         request,
         "cpanel/services/list.html",
@@ -69,8 +115,31 @@ def services_view(request: HttpRequest) -> HttpResponse:
             "ai_provider_form": AIProviderForm(),
             "ai_providers_json": providers_data,
             "ai_presets_json": presets_data,
+            "secret_providers": secret_providers,
+            "secret_provider_form": SecretProviderForm(),
+            "secret_providers_json": secret_providers_data,
+            "secret_backends_json": secret_backends_data,
         },
     )
+
+
+def _secret_counts_by_provider() -> dict:
+    """Map provider id → number of secrets referencing it (the in-use-by-N count).
+
+    Counted across ALL workspaces on purpose: profiles are instance-global, and
+    the count exists to protect against deleting a profile that any secret —
+    anywhere — still resolves through (mirrors the PROTECT FK).
+    """
+    from django.db.models import Count
+
+    from core.models import Secret
+
+    rows = (
+        Secret.objects.filter(source=Secret.Source.EXTERNAL, provider__isnull=False)
+        .values("provider_id")
+        .annotate(n=Count("id"))
+    )
+    return {r["provider_id"]: r["n"] for r in rows}
 
 
 @login_required
@@ -183,7 +252,13 @@ def ai_provider_save_view(request: HttpRequest) -> HttpResponse:
     instance = None
     provider_id = request.POST.get("provider_id")
     if provider_id:
-        instance = AIProvider.objects.filter(pk=provider_id).first()
+        # provider_id is a hidden POST field, not a URL-validated <uuid:…>; a
+        # malformed value raises ValidationError on the pk lookup, which would
+        # 500 instead of showing the friendly "Provider not found".
+        try:
+            instance = AIProvider.objects.filter(pk=provider_id).first()
+        except (ValidationError, ValueError):
+            instance = None
         if instance is None:
             messages.error(request, "Provider not found.")
             return redirect("cpanel:services")
@@ -246,6 +321,135 @@ def ai_provider_activate_view(request: HttpRequest, provider_id) -> HttpResponse
     settings.save(update_fields=["active_ai_provider"])
     messages.success(request, f"'{provider.name}' is now the active AI provider.")
     return redirect("cpanel:services")
+
+
+# --------------------------------------------------------------------------- #
+# External Secret Providers (Stage 2)
+# --------------------------------------------------------------------------- #
+@login_required
+@superuser_required
+@require_POST
+def secret_provider_save_view(request: HttpRequest) -> HttpResponse:
+    """Create or update a SecretProvider profile (hidden provider_id = edit)."""
+    instance = None
+    provider_id = request.POST.get("provider_id")
+    if provider_id:
+        # Hidden POST field, not a URL-validated <uuid:…>; a malformed value would
+        # raise on the pk lookup, so guard it into the friendly "not found".
+        try:
+            instance = SecretProvider.objects.filter(pk=provider_id).first()
+        except (ValidationError, ValueError):
+            instance = None
+        if instance is None:
+            messages.error(request, "Secret provider not found.")
+            return redirect("cpanel:services")
+
+    form = SecretProviderForm(request.POST, instance=instance)
+    if form.is_valid():
+        provider = form.save()
+        messages.success(request, f"Secret provider '{provider.name}' saved.")
+    else:
+        for field, errors in form.errors.items():
+            label = "" if field == "__all__" else f"{field}: "
+            for error in errors:
+                messages.error(request, f"{label}{error}")
+
+    return redirect("cpanel:services")
+
+
+@login_required
+@superuser_required
+@require_POST
+def secret_provider_delete_view(request: HttpRequest, provider_id) -> HttpResponse:
+    """Delete a secret-provider profile, blocked while secrets reference it.
+
+    The FK is ``PROTECT``, so a referenced profile raises ``ProtectedError`` — we
+    surface that as a clear, actionable message instead of a 500 (deleting a
+    profile out from under secrets would strand them as unresolvable)."""
+    provider = SecretProvider.objects.filter(pk=provider_id).first()
+    if provider is None:
+        messages.error(request, "Secret provider not found.")
+        return redirect("cpanel:services")
+
+    name = provider.name
+    try:
+        provider.delete()
+    except ProtectedError:
+        n = _secret_counts_by_provider().get(provider.id, 0)
+        messages.error(
+            request,
+            f"Cannot delete '{name}' — {n} secret(s) still reference it. Reassign "
+            "or delete those secrets first, then delete the provider.",
+        )
+        return redirect("cpanel:services")
+
+    messages.success(request, f"Secret provider '{name}' deleted.")
+    return redirect("cpanel:services")
+
+
+@login_required
+@superuser_required
+@require_POST
+def secret_provider_test_view(request: HttpRequest) -> JsonResponse:
+    """Test a secret-provider connection (saved row or unsaved form values).
+
+    Body: {"provider_id"?, "provider_type", "config": {...}, "credentials": {...}}.
+    Typed credentials override the saved ones (edit-before-save); a saved row gets
+    its ``last_tested_at`` stamped on success. The probe provider is transient so
+    typed credentials are never persisted by a test.
+    """
+    try:
+        data = {}
+        if request.body:
+            try:
+                data = json.loads(request.body)
+            except json.JSONDecodeError:
+                return JsonResponse(
+                    {"success": False, "error": "Invalid JSON in request body"},
+                    status=400,
+                )
+
+        provider_id = data.get("provider_id")
+        saved = SecretProvider.objects.filter(pk=provider_id).first() if provider_id else None
+        if provider_id and saved is None:
+            return JsonResponse({"success": False, "error": "Provider not found."})
+
+        ptype = data.get("provider_type") or (saved.provider_type if saved else "")
+        try:
+            backend = get_backend(ptype)
+        except SecretResolutionError as e:
+            return JsonResponse({"success": False, "error": str(e)})
+
+        config = data.get("config")
+        if config is None:
+            config = saved.config if saved else {}
+        creds = dict(saved.get_credentials()) if saved else {}
+        for key, val in (data.get("credentials") or {}).items():
+            if val:
+                creds[key] = val
+
+        probe = SecretProvider(
+            provider_type=ptype,
+            name=(saved.name if saved else "test"),
+            config=config or {},
+        )
+        probe.set_credentials(creds)
+        ok, message = backend.test_connection(probe)
+
+        if ok and saved is not None:
+            saved.last_tested_at = timezone.now()
+            saved.save(update_fields=["last_tested_at"])
+
+        return JsonResponse(
+            {
+                "success": ok,
+                "message": message if ok else None,
+                "error": message if not ok else None,
+            }
+        )
+    except Exception as e:
+        logger.exception("Secret provider connection test failed")
+        return JsonResponse({"success": False, "error": str(e)})
 
 
 @login_required

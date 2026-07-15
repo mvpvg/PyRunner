@@ -22,6 +22,20 @@ def pyrunner_version(request):
     return context
 
 
+def instance_meta(request):
+    """Instance identity (Settings → General → Instance Name) for the header
+    and page titles. Defensive: before setup or on a DB hiccup, fall back to
+    the product name so rendering never breaks.
+    """
+    try:
+        from core.models import GlobalSettings
+
+        name = (GlobalSettings.get_settings().instance_name or "").strip()
+    except Exception:
+        name = ""
+    return {"instance_name": name or "PyRunner"}
+
+
 def plugin_nav(request):
     """Sidebar nav items contributed by active plugins (empty for anonymous).
 
@@ -47,6 +61,9 @@ def workspaces(request):
         "active_workspace": getattr(request, "workspace", None),
         "user_workspaces": [],
         "show_workspace_switcher": False,
+        # Whether the user may manage the ACTIVE workspace (Owner/Admin role or
+        # superuser) — gates management-only nav items like Databases.
+        "user_can_manage_workspace": False,
     }
 
     user = getattr(request, "user", None)
@@ -54,13 +71,22 @@ def workspaces(request):
         return ctx
 
     try:
-        from core.models import Workspace
+        from core.models import Workspace, WorkspaceMembership
 
         user_workspaces = list(
             Workspace.for_user(user).order_by("-is_default", "name")
         )
         ctx["user_workspaces"] = user_workspaces
         ctx["show_workspace_switcher"] = len(user_workspaces) >= 2
+
+        if user.is_superuser:
+            ctx["user_can_manage_workspace"] = True
+        elif ctx["active_workspace"] is not None:
+            ctx["user_can_manage_workspace"] = WorkspaceMembership.objects.filter(
+                user=user,
+                workspace=ctx["active_workspace"],
+                role__in=WorkspaceMembership.MANAGE_ROLES,
+            ).exists()
     except Exception:
         pass
 

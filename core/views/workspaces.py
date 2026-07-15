@@ -16,7 +16,7 @@ Gating contract (consistent with the rest of tenancy):
   the privilege).
 """
 from django.contrib import messages
-from django.contrib.auth.decorators import login_required, user_passes_test
+from django.contrib.auth.decorators import login_required
 from django.core.exceptions import PermissionDenied
 from django.db.models import Count
 from django.http import Http404, HttpRequest, HttpResponse
@@ -24,6 +24,7 @@ from django.shortcuts import get_object_or_404, redirect, render
 from django.views.decorators.http import require_POST
 
 from core.models import User, Workspace, WorkspaceMembership
+from core.views.decorators import superuser_required
 
 MAX_NAME_LEN = 100
 
@@ -31,11 +32,6 @@ MAX_NAME_LEN = 100
 # silently orphans tenant data (reverse accessors of the workspace FK).
 # Environments are SHARED infra, excluded here.
 _OWNED_RELATIONS = ("scripts", "secrets", "runs", "datastores", "schedules")
-
-
-def is_superuser(user) -> bool:
-    """Instance-level gate (creating workspaces is tenant provisioning)."""
-    return user.is_superuser
 
 
 def _membership(user, workspace):
@@ -112,8 +108,10 @@ def workspace_list_view(request: HttpRequest) -> HttpResponse:
     )
 
 
+# Creating a workspace is instance-level tenant provisioning, so it is
+# superuser-only (unlike the role-based rename/members/delete views below).
 @login_required
-@user_passes_test(is_superuser)
+@superuser_required
 @require_POST
 def workspace_create_view(request: HttpRequest) -> HttpResponse:
     """Create a workspace; the creator becomes its owner (superuser only)."""

@@ -6,11 +6,11 @@ import logging
 from functools import wraps
 
 from django.conf import settings
-from django.core.cache import cache
 from django.http import JsonResponse
 from django.utils import timezone
 
 from core.models import DataStoreAPIToken
+from core.ratelimit import rate_limit_exceeded
 
 logger = logging.getLogger(__name__)
 
@@ -61,18 +61,15 @@ def api_token_required(view_func):
                 status=401,
             )
 
-        # Rate limiting by token
-        rate_key = f"api_rate_{api_token.id}"
-        requests_count = cache.get(rate_key, 0)
-
-        if requests_count >= API_RATE_LIMIT:
+        # Rate limiting by token (fixed window, shared helper)
+        if rate_limit_exceeded(
+            f"api_rate_{api_token.id}", API_RATE_LIMIT, API_RATE_WINDOW
+        ):
             logger.warning(f"API rate limit exceeded for token: {api_token.name}")
             return JsonResponse(
                 {"error": {"code": "RATE_LIMITED", "message": "Rate limit exceeded. Try again later."}},
                 status=429,
             )
-
-        cache.set(rate_key, requests_count + 1, API_RATE_WINDOW)
 
         # Update last used timestamp (async-safe, won't block)
         DataStoreAPIToken.objects.filter(id=api_token.id).update(

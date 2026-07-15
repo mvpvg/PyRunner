@@ -101,31 +101,7 @@ class GlobalSettings(models.Model):
     timezone = models.CharField(
         max_length=50,
         default="UTC",
-        help_text="Default timezone for the instance",
-    )
-
-    class DateFormat(models.TextChoices):
-        ISO = "YYYY-MM-DD", "YYYY-MM-DD (ISO)"
-        US = "MM/DD/YYYY", "MM/DD/YYYY (US)"
-        EU = "DD/MM/YYYY", "DD/MM/YYYY (EU)"
-        DOT = "DD.MM.YYYY", "DD.MM.YYYY"
-
-    date_format = models.CharField(
-        max_length=20,
-        choices=DateFormat.choices,
-        default=DateFormat.ISO,
-        help_text="Date display format",
-    )
-
-    class TimeFormat(models.TextChoices):
-        H24 = "24h", "24-hour"
-        H12 = "12h", "12-hour"
-
-    time_format = models.CharField(
-        max_length=10,
-        choices=TimeFormat.choices,
-        default=TimeFormat.H24,
-        help_text="Time display format",
+        help_text="Display timezone for the console; scheduled backup times are interpreted in it too",
     )
 
     # Security Settings
@@ -198,7 +174,9 @@ class GlobalSettings(models.Model):
     # Registration control
     allow_registration = models.BooleanField(
         default=True,
-        help_text="Allow new users to register without an invite (auto-disabled after first user)",
+        help_text="Dormant/reserved: registration is invite-only by design (there is "
+        "no open-registration UI). Auto-set False after the first user for legacy "
+        "reasons; not consulted by any live registration path.",
     )
 
     # S3 Storage Configuration
@@ -310,7 +288,7 @@ class GlobalSettings(models.Model):
         default="",
         help_text="Error message from last failed backup",
     )
-    s3_backup_last_size = models.PositiveIntegerField(
+    s3_backup_last_size = models.BigIntegerField(
         default=0,
         help_text="Size of last backup in bytes",
     )
@@ -396,7 +374,7 @@ class GlobalSettings(models.Model):
         choices=SandboxMode.choices,
         default=SandboxMode.OFF,
         help_text="Instance-wide isolation default (off = today's behavior). "
-        "Gates the filesystem/network sandbox, which arrives in a later stage; "
+        "Gates the filesystem/network sandbox (SandboxedSubprocessBackend); "
         "the resource limits below apply independently of this setting.",
     )
     sandbox_fail_closed = models.BooleanField(
@@ -426,7 +404,7 @@ class GlobalSettings(models.Model):
         choices=SandboxCapability.choices,
         default=SandboxCapability.UNKNOWN,
         help_text="Cached result of the host sandbox capability probe "
-        "(populated by the Test button / sandbox_check command in a later stage).",
+        "(populated by the Test button / sandbox_check command).",
     )
     sandbox_checked_at = models.DateTimeField(
         null=True,
@@ -460,16 +438,23 @@ class GlobalSettings(models.Model):
             return False
         return self.worker_settings_updated_at > self.worker_heartbeat_at
 
-    def worker_is_alive(self, threshold_seconds: int = 180) -> bool:
+    # Seconds since the last worker heartbeat after which a worker counts as down.
+    # ONE window, shared by worker_is_alive() (inbound-webhook fast-fail) and the
+    # dashboard worker-status card (system_info_service), so they never disagree.
+    # The heartbeat task runs every minute → 3 min = two missed beats = genuinely down.
+    WORKER_HEARTBEAT_TIMEOUT_SECONDS = 180
+
+    def worker_is_alive(self, threshold_seconds: int | None = None) -> bool:
         """Whether a django-q worker has heartbeat-ed recently.
 
         Used by the inbound webhook to fast-fail with a friendly "asleep" reply
         instead of silently enqueuing a message no worker will ever process.
-        The heartbeat task runs every minute; the default 3-minute window means
-        only a genuinely-down worker trips it.
+        Defaults to the shared ``WORKER_HEARTBEAT_TIMEOUT_SECONDS`` window.
         """
         from django.utils import timezone
 
+        if threshold_seconds is None:
+            threshold_seconds = self.WORKER_HEARTBEAT_TIMEOUT_SECONDS
         if not self.worker_heartbeat_at:
             return False
         return (timezone.now() - self.worker_heartbeat_at).total_seconds() < threshold_seconds

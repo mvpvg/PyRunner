@@ -1,9 +1,11 @@
 """
 Seam 3 — workspace column + default-workspace backfill (tenancy seam).
 
-Proves the seam is inert and non-breaking: one default workspace, every existing
-row backfilled to it, the backfill idempotent + reversible, new rows still
-default to NULL (no query-scoping), and a failed migration is now boot-fatal.
+Proves the workspace column + backfill are non-breaking: one default workspace,
+every existing row backfilled to it, the backfill idempotent + reversible, new
+rows default to NULL at the model layer (views assign the workspace explicitly;
+query-scoping lives in the manager/view layer), and a failed migration is now
+boot-fatal.
 """
 
 import importlib
@@ -79,7 +81,8 @@ class WorkspaceBackfillTests(TestCase):
         self.assertEqual(Workspace.objects.filter(is_default=True).count(), 0)
 
     def test_new_row_defaults_to_null_workspace(self):
-        # The seam is inert: nothing auto-scopes new rows (no query-scoping yet).
+        # Row creation is not auto-scoped: a Script created without an explicit
+        # workspace defaults to NULL (views set workspace=request.workspace).
         fresh = Script.objects.create(name="fresh", code="x", environment=self.env)
         self.assertIsNone(fresh.workspace_id)
 

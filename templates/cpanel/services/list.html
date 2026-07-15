@@ -336,6 +336,148 @@ print(answer)</code></pre>
             {{ ai_providers_json|json_script:"ai-providers-data" }}
             {{ ai_presets_json|json_script:"ai-presets-data" }}
 
+            <!-- Secret Providers Service Card -->
+            <div class="rounded-2xl border border-line bg-panel overflow-hidden">
+                <div class="p-6 border-b border-line-soft">
+                    <div class="flex items-center justify-between gap-4">
+                        <div class="flex items-center gap-4 min-w-0">
+                            <div class="w-12 h-12 rounded-lg bg-info/10 grid place-items-center flex-shrink-0">
+                                <svg class="w-6 h-6 text-info" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"/></svg>
+                            </div>
+                            <div class="min-w-0">
+                                <div class="flex items-center gap-2">
+                                    <h2 class="text-lg font-semibold text-text">Secret Providers</h2>
+                                    <span class="px-1.5 py-0.5 rounded-md bg-warn/10 text-warn eyebrow leading-none">Beta</span>
+                                </div>
+                                <p class="text-sm text-muted">Resolve secret values live from an external manager &mdash; HashiCorp Vault / OpenBao &mdash; instead of storing them here. Point a secret at a provider from the secret form.</p>
+                            </div>
+                        </div>
+
+                        <div class="flex items-center gap-3 flex-shrink-0">
+                            {% if secret_providers %}
+                            <span class="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-md bg-ok/10 text-ok"><span class="w-1.5 h-1.5 rounded-full bg-ok"></span>{{ secret_providers|length }} configured</span>
+                            {% else %}
+                            <span class="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-md bg-panel-hi text-faint"><span class="w-1.5 h-1.5 rounded-full bg-faint"></span>Not configured</span>
+                            {% endif %}
+
+                            <button type="button" onclick="toggleSecretProvidersConfig()" class="p-2 text-muted hover:text-text transition-colors">
+                                <svg id="sp-chevron" class="w-5 h-5 transform transition-transform" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/></svg>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="sp-config" class="hidden">
+                    <div class="p-6 space-y-6">
+
+                        <!-- Saved providers -->
+                        <div>
+                            <div class="flex items-center justify-between gap-3 mb-3">
+                                <p class="text-[13px] font-medium text-text">Saved providers</p>
+                                <button type="button" onclick="spNewProvider()" class="text-[13px] px-3.5 py-2 rounded-lg border border-line text-muted hover:text-text hover:border-faint transition-colors">+ Add provider</button>
+                            </div>
+
+                            {% if secret_providers %}
+                            <div class="border border-line-soft rounded-lg overflow-hidden">
+                                <div class="overflow-x-auto">
+                                <table class="w-full text-sm min-w-[640px]">
+                                    <thead>
+                                        <tr class="text-left bg-panel-hi/40">
+                                            <th class="eyebrow text-faint font-normal px-4 py-2">Name</th>
+                                            <th class="eyebrow text-faint font-normal px-4 py-2">Type</th>
+                                            <th class="eyebrow text-faint font-normal px-4 py-2">In use</th>
+                                            <th class="eyebrow text-faint font-normal px-4 py-2">Last tested</th>
+                                            <th class="eyebrow text-faint font-normal px-4 py-2 text-right">Actions</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {% for p in secret_providers %}
+                                        <tr class="border-t border-line-soft">
+                                            <td class="px-4 py-2.5 text-text font-medium whitespace-nowrap">{{ p.name }}</td>
+                                            <td class="px-4 py-2.5 text-muted whitespace-nowrap">{{ p.type_label }}</td>
+                                            <td class="px-4 py-2.5 text-muted whitespace-nowrap">{{ p.secret_count }} secret{{ p.secret_count|pluralize }}</td>
+                                            <td class="px-4 py-2.5 text-muted whitespace-nowrap">{% if p.last_tested_at %}{{ p.last_tested_at|timesince }} ago{% else %}&mdash;{% endif %}</td>
+                                            <td class="px-4 py-2.5">
+                                                <div class="flex items-center justify-end gap-1.5 whitespace-nowrap">
+                                                    <button type="button" onclick="spTestRow('{{ p.id }}', this)" class="text-xs px-2.5 py-1.5 rounded-lg border border-line text-muted hover:text-text hover:border-faint transition-colors">Test</button>
+                                                    <button type="button" onclick="spEditProvider('{{ p.id }}')" class="text-xs px-2.5 py-1.5 rounded-lg border border-line text-muted hover:text-text hover:border-faint transition-colors">Edit</button>
+                                                    <form method="post" action="{% url 'cpanel:secret_provider_delete' provider_id=p.id %}" class="inline" onsubmit="return confirm('Delete secret provider \'{{ p.name|escapejs }}\'? Its saved credentials will be removed.');">
+                                                        {% csrf_token %}
+                                                        <button type="submit" class="text-xs px-2.5 py-1.5 rounded-lg border border-line text-fail/80 hover:text-fail hover:border-fail/50 transition-colors">Delete</button>
+                                                    </form>
+                                                </div>
+                                            </td>
+                                        </tr>
+                                        {% endfor %}
+                                    </tbody>
+                                </table>
+                                </div>
+                            </div>
+                            {% else %}
+                            <div class="border border-dashed border-line rounded-lg p-5 text-center text-sm text-muted">
+                                No secret providers yet. Add one to resolve secret values from HashiCorp Vault or OpenBao.
+                            </div>
+                            {% endif %}
+                        </div>
+
+                        <!-- Add / edit provider form -->
+                        <div id="sp-provider-form-wrap" class="hidden border border-line-soft rounded-lg p-5 bg-panel-hi/30">
+                            <p id="sp-provider-form-title" class="text-[13px] font-medium text-text mb-4">Add provider</p>
+                            <form method="post" action="{% url 'cpanel:secret_provider_save' %}" id="sp-provider-form">
+                                {% csrf_token %}
+                                <input type="hidden" name="provider_id" id="sp-provider-id" value="">
+
+                                <div class="grid grid-cols-1 md:grid-cols-2 gap-5 mb-5">
+                                    <div>
+                                        <label class="block text-[13px] font-medium text-text mb-1.5">{{ secret_provider_form.provider_type.label }}</label>
+                                        {{ secret_provider_form.provider_type }}
+                                    </div>
+                                    <div>
+                                        <label class="block text-[13px] font-medium text-text mb-1.5">{{ secret_provider_form.name.label }}</label>
+                                        {{ secret_provider_form.name }}
+                                    </div>
+
+                                    <!-- Adapter-specific fields, rendered from the registry -->
+                                    <div id="sp-dynamic-fields" class="md:col-span-2 grid grid-cols-1 md:grid-cols-2 gap-5"></div>
+
+                                    <div>
+                                        <label class="block text-[13px] font-medium text-text mb-1.5">{{ secret_provider_form.cache_ttl.label }}</label>
+                                        {{ secret_provider_form.cache_ttl }}
+                                        <p class="mt-1.5 text-xs text-faint">{{ secret_provider_form.cache_ttl.help_text }}</p>
+                                    </div>
+                                    <div>
+                                        <label class="block text-[13px] font-medium text-text mb-1.5">{{ secret_provider_form.on_error.label }}</label>
+                                        {{ secret_provider_form.on_error }}
+                                        <p class="mt-1.5 text-xs text-faint">{{ secret_provider_form.on_error.help_text }}</p>
+                                    </div>
+                                </div>
+
+                                <p id="sp-provider-docs" class="hidden mb-5 text-xs text-muted"></p>
+
+                                <div class="flex items-center gap-2.5">
+                                    <button type="submit" class="text-[13px] font-medium px-3.5 py-2 rounded-lg bg-ok text-ink hover:opacity-90 transition">Save provider</button>
+                                    <button type="button" onclick="spTestForm()" id="sp-test-form-btn" class="text-[13px] px-3.5 py-2 rounded-lg border border-line text-muted hover:text-text hover:border-faint transition-colors">Test connection</button>
+                                    <button type="button" onclick="spCancelProviderForm()" class="text-[13px] px-3.5 py-2 rounded-lg text-muted hover:text-text transition-colors">Cancel</button>
+                                </div>
+                            </form>
+                        </div>
+
+                        <!-- Usage help -->
+                        <div class="p-4 bg-panel-hi/40 border border-line-soft rounded-lg text-sm text-muted">
+                            <p class="text-text font-medium mb-2">How it works</p>
+                            <p class="mb-2">A secret with source <span class="text-text">External provider</span> stores only a reference (e.g. <span class="font-mono text-text">kv/myapp#API_KEY</span>). Its value is fetched from the provider when a run starts, injected and masked exactly like a stored secret, and cached in-process for the provider's TTL.</p>
+                            <p>If a fetch fails, the run fails before it starts (fail-closed) &mdash; unless the provider's on-error is set to serve the last cached value. Rotate a value in the provider and the next run past the TTL picks it up.</p>
+                        </div>
+
+                    </div>
+
+                    <div id="sp-test-result" class="hidden mx-6 mb-6 p-4 rounded-lg"></div>
+                </div>
+            </div>
+
+            {{ secret_providers_json|json_script:"secret-providers-data" }}
+            {{ secret_backends_json|json_script:"secret-backends-data" }}
+
             <!-- Future services placeholder -->
             <div class="rounded-2xl border border-dashed border-line bg-panel/50 p-8 text-center">
                 <div class="w-12 h-12 rounded-lg bg-panel-hi grid place-items-center mx-auto mb-4">
@@ -586,6 +728,148 @@ function aiTestForm() {
     aiPostTest(payload, document.getElementById('ai-test-form-btn'), 'Testing…');
 }
 
+// ---- Secret Providers card ----
+const SP_PROVIDERS = JSON.parse(document.getElementById('secret-providers-data').textContent);
+const SP_BACKENDS = JSON.parse(document.getElementById('secret-backends-data').textContent);
+const SP_BACKENDS_BY_KEY = {};
+SP_BACKENDS.forEach(function (b) { SP_BACKENDS_BY_KEY[b.provider_key] = b; });
+const SP_INPUT_CLASS = 'w-full px-3.5 py-2.5 bg-ink border border-line rounded-lg text-text text-sm placeholder-faint/60 focus:outline-none focus:ring-2 focus:ring-ok/30 focus:border-ok/60 transition-colors';
+
+function toggleSecretProvidersConfig() {
+    document.getElementById('sp-config').classList.toggle('hidden');
+    document.getElementById('sp-chevron').classList.toggle('rotate-180');
+}
+
+function spFormField(name) {
+    return document.querySelector('#sp-provider-form [name="' + name + '"]');
+}
+
+// Render the adapter's credential/config inputs for the selected type — entirely
+// from the registry specs, so a new adapter needs no template change. configValues
+// prefills config fields on edit; hasCredentials shows the keep-saved hint.
+function spRenderFields(configValues, hasCredentials) {
+    const type = spFormField('provider_type').value;
+    const backend = SP_BACKENDS_BY_KEY[type] || {fields: []};
+    const wrap = document.getElementById('sp-dynamic-fields');
+    wrap.innerHTML = '';
+    (backend.fields || []).forEach(function (spec) {
+        const isCred = spec.kind === 'credential';
+        const div = document.createElement('div');
+        const label = document.createElement('label');
+        label.className = 'block text-[13px] font-medium text-text mb-1.5';
+        label.textContent = spec.label + (spec.required ? '' : ' (optional)');
+        const input = document.createElement('input');
+        input.type = isCred ? 'password' : 'text';
+        input.name = 'f_' + spec.name;
+        input.className = SP_INPUT_CLASS + (isCred ? '' : ' font-mono');
+        input.placeholder = spec.placeholder || '';
+        input.autocomplete = isCred ? 'new-password' : 'off';
+        if (!isCred && configValues && configValues[spec.name] != null) {
+            input.value = configValues[spec.name];
+        }
+        div.appendChild(label);
+        div.appendChild(input);
+        if (spec.help) {
+            const help = document.createElement('p');
+            help.className = 'mt-1.5 text-xs text-faint';
+            help.textContent = spec.help;
+            div.appendChild(help);
+        }
+        if (isCred && hasCredentials) {
+            const saved = document.createElement('p');
+            saved.className = 'mt-1.5 text-xs text-ok';
+            saved.textContent = 'A value is saved — leave blank to keep it.';
+            div.appendChild(saved);
+        }
+        wrap.appendChild(div);
+    });
+    const docs = document.getElementById('sp-provider-docs');
+    if (backend.docs_url) {
+        docs.innerHTML = 'Reference: <a href="' + escapeHtml(backend.docs_url) + '" target="_blank" rel="noopener" class="text-info hover:underline">' + escapeHtml(backend.label || type) + ' docs</a>';
+        docs.classList.remove('hidden');
+    } else {
+        docs.classList.add('hidden');
+    }
+}
+
+function spShowProviderForm() { document.getElementById('sp-provider-form-wrap').classList.remove('hidden'); }
+function spCancelProviderForm() { document.getElementById('sp-provider-form-wrap').classList.add('hidden'); }
+
+function spNewProvider() {
+    document.getElementById('sp-provider-form-title').textContent = 'Add provider';
+    document.getElementById('sp-provider-id').value = '';
+    spFormField('name').value = '';
+    spFormField('cache_ttl').value = '300';
+    spFormField('on_error').value = 'fail';
+    spRenderFields(null, false);
+    spShowProviderForm();
+    spFormField('name').focus();
+}
+
+function spEditProvider(id) {
+    const p = SP_PROVIDERS.find(function (x) { return x.id === id; });
+    if (!p) return;
+    document.getElementById('sp-provider-form-title').textContent = 'Edit provider — ' + p.name;
+    document.getElementById('sp-provider-id').value = p.id;
+    spFormField('provider_type').value = p.provider_type;
+    spFormField('name').value = p.name;
+    spFormField('cache_ttl').value = p.cache_ttl;
+    spFormField('on_error').value = p.on_error;
+    spRenderFields(p.config || {}, p.has_credentials);
+    spShowProviderForm();
+}
+
+function spRenderTestResult(data) {
+    const resultDiv = document.getElementById('sp-test-result');
+    resultDiv.classList.remove('hidden');
+    if (data.success) {
+        resultDiv.className = 'mx-6 mb-6 p-4 rounded-lg bg-ok/10 border border-ok/30 text-ok';
+        resultDiv.innerHTML = '<div class="flex items-start"><svg class="w-5 h-5 mr-2 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg><span>' + escapeHtml(data.message) + '</span></div>';
+    } else {
+        resultDiv.className = 'mx-6 mb-6 p-4 rounded-lg bg-fail/10 border border-fail/30 text-fail';
+        resultDiv.innerHTML = '<div class="flex items-start"><svg class="w-5 h-5 mr-2 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg><span>' + escapeHtml(data.error) + '</span></div>';
+    }
+}
+
+function spPostTest(payload, btn) {
+    const original = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Testing…';
+    document.getElementById('sp-test-result').classList.add('hidden');
+    fetch('{% url "cpanel:secret_provider_test" %}', {
+        method: 'POST',
+        headers: {'X-CSRFToken': '{{ csrf_token }}', 'Content-Type': 'application/json'},
+        body: JSON.stringify(payload),
+    })
+    .then(function (r) { return r.json(); })
+    .then(spRenderTestResult)
+    .catch(function (e) { spRenderTestResult({success: false, error: e.message}); })
+    .finally(function () { btn.disabled = false; btn.textContent = original; });
+}
+
+function spTestRow(id, btn) { spPostTest({provider_id: id}, btn); }
+
+function spCollectFields() {
+    const type = spFormField('provider_type').value;
+    const backend = SP_BACKENDS_BY_KEY[type] || {fields: []};
+    const config = {}, credentials = {};
+    (backend.fields || []).forEach(function (spec) {
+        const el = document.querySelector('#sp-provider-form [name="f_' + spec.name + '"]');
+        const val = el ? el.value : '';
+        if (spec.kind === 'credential') { credentials[spec.name] = val; }
+        else { config[spec.name] = val; }
+    });
+    return {type: type, config: config, credentials: credentials};
+}
+
+function spTestForm() {
+    const collected = spCollectFields();
+    const payload = {provider_type: collected.type, config: collected.config, credentials: collected.credentials};
+    const editingId = document.getElementById('sp-provider-id').value;
+    if (editingId) payload.provider_id = editingId;  // blank creds -> saved ones
+    spPostTest(payload, document.getElementById('sp-test-form-btn'));
+}
+
 // Auto-expand if form has errors or if not configured
 document.addEventListener('DOMContentLoaded', function() {
     {% if s3_form.errors or not s3_status.configured %}
@@ -601,6 +885,12 @@ document.addEventListener('DOMContentLoaded', function() {
     toggleClaudeConfig();
     aiNewProvider();
     {% endif %}
+
+    const spType = spFormField('provider_type');
+    if (spType) {
+        spType.addEventListener('change', function () { spRenderFields(null, false); });
+        spRenderFields(null, false);  // initial render for the default type
+    }
 });
 </script>
 {% endblock %}

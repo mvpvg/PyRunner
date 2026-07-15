@@ -7,7 +7,7 @@ from zoneinfo import available_timezones
 from django import forms
 from django.utils.text import slugify
 
-from core.models import Script, Environment, ScriptSchedule, Tag, DataStore, DataStoreEntry, DataStoreAPIToken
+from core.models import Script, Environment, ScriptSchedule, Tag, DataStore, DataStoreEntry, DataStoreAPIToken, Database, Secret, SecretProvider
 from core.services import EnvironmentService
 
 
@@ -27,10 +27,6 @@ FILE_CLASS = (
     "file:border-0 file:text-sm file:font-medium file:bg-ok file:text-ink "
     "hover:file:opacity-90 cursor-pointer"
 )
-# Console alias captured up here so it survives the LEGACY `INPUT_CLASS` redefinition
-# further down (~line 1516, used by the not-yet-migrated auth/backup forms). Migrated
-# forms defined AFTER that redefinition should reference CONSOLE_INPUT_CLASS.
-CONSOLE_INPUT_CLASS = INPUT_CLASS
 
 
 class PluginUploadForm(forms.Form):
@@ -68,11 +64,16 @@ COMMON_TIMEZONES = [
 
 
 def get_timezone_choices():
-    """Generate timezone choices with common ones first."""
+    """Timezone choices grouped Common/All.
+
+    Optgroups (not a fake separator row) so the visual divider is not a
+    submittable value — a plain separator choice used to validate and could be
+    stored as timezone="---".
+    """
     all_tz = sorted(available_timezones())
     common = [(tz, tz) for tz in COMMON_TIMEZONES if tz in all_tz]
     others = [(tz, tz) for tz in all_tz if tz not in COMMON_TIMEZONES]
-    return [("", "---")] + common + [("---", "─" * 20)] + others
+    return [("Common", common), ("All timezones", others)]
 
 
 class ScriptForm(forms.ModelForm):
@@ -647,13 +648,22 @@ class BulkInstallForm(forms.Form):
 
 
 class SecretCreateForm(forms.Form):
-    """Form for creating a new secret."""
+    """Form for creating a new secret.
+
+    Value source (External Secret Providers): ``source="local"`` stores an
+    encrypted ``value`` (today's path); ``source="external"`` stores a reference
+    (``provider`` + ``external_ref``) resolved live at run time. The value/provider
+    fields are conditionally required in ``clean()`` on the chosen source.
+    """
 
     def __init__(self, *args, workspace=None, **kwargs):
         # The active workspace scopes the key-uniqueness check (tenancy Stage 3:
         # secret keys are unique per workspace, not globally).
         self._workspace = workspace
         super().__init__(*args, **kwargs)
+        # Set the provider queryset here (not at class scope) to avoid a DB hit at
+        # import time, and to keep the dropdown fresh per request.
+        self.fields["provider"].queryset = SecretProvider.objects.all().order_by("name")
 
     key = forms.CharField(
         max_length=100,
@@ -668,7 +678,18 @@ class SecretCreateForm(forms.Form):
         help_text="Uppercase letters, numbers, and underscores only. Must start with a letter.",
     )
 
+    # required=False so a POST that omits it means today's local secret — keeps
+    # every existing caller (and existing test) byte-for-byte; clean() normalizes.
+    source = forms.ChoiceField(
+        choices=Secret.Source.choices,
+        initial=Secret.Source.LOCAL,
+        required=False,
+        widget=forms.Select(attrs={"class": INPUT_CLASS}),
+        label="Value source",
+    )
+
     value = forms.CharField(
+        required=False,
         widget=forms.Textarea(
             attrs={
                 "class": INPUT_CLASS + " font-mono",
@@ -679,6 +700,28 @@ class SecretCreateForm(forms.Form):
         ),
         label="Secret Value",
         help_text="The secret value (will be encrypted at rest)",
+    )
+
+    provider = forms.ModelChoiceField(
+        queryset=SecretProvider.objects.none(),
+        required=False,
+        empty_label="— select a provider —",
+        widget=forms.Select(attrs={"class": INPUT_CLASS}),
+        label="Provider",
+    )
+
+    external_ref = forms.CharField(
+        required=False,
+        max_length=500,
+        widget=forms.TextInput(
+            attrs={
+                "class": INPUT_CLASS + " font-mono",
+                "placeholder": "path/to/secret#key",
+                "autocomplete": "off",
+            }
+        ),
+        label="Reference",
+        help_text="Reference to the value within the provider (e.g. a Vault path#key).",
     )
 
     description = forms.CharField(
@@ -693,6 +736,25 @@ class SecretCreateForm(forms.Form):
         label="Description",
         help_text="Optional description to help remember what this secret is for",
     )
+
+    def clean_external_ref(self):
+        return (self.cleaned_data.get("external_ref") or "").strip()
+
+    def clean(self):
+        cleaned = super().clean()
+        source = cleaned.get("source") or Secret.Source.LOCAL
+        cleaned["source"] = source  # normalize blank → local for the view
+        if source == Secret.Source.EXTERNAL:
+            if not cleaned.get("provider"):
+                self.add_error("provider", "Select a provider for an external secret.")
+            if not cleaned.get("external_ref"):
+                self.add_error(
+                    "external_ref", "A reference is required for an external secret."
+                )
+        else:  # local
+            if not cleaned.get("value"):
+                self.add_error("value", "Secret value is required.")
+        return cleaned
 
     def clean_key(self):
         """Validate and normalize the key."""
@@ -739,11 +801,9 @@ class SecretCreateForm(forms.Form):
         return key
 
     def clean_value(self):
-        """Validate the secret value."""
+        """Length-check only; the required-ness of the value depends on the chosen
+        source and is enforced in ``clean()`` (local needs a value; external does not)."""
         value = self.cleaned_data.get("value", "")
-
-        if not value:
-            raise forms.ValidationError("Secret value is required.")
 
         # Reasonable max length for secrets
         if len(value) > 10000:
@@ -755,7 +815,32 @@ class SecretCreateForm(forms.Form):
 
 
 class SecretEditForm(forms.Form):
-    """Form for editing an existing secret (value and description only)."""
+    """Form for editing an existing secret (value/source and description).
+
+    Supports switching a secret's value source (External Secret Providers). A
+    local edit may leave ``value`` blank to keep the stored value; switching to
+    (or staying) external requires ``provider`` + ``external_ref``.
+    """
+
+    def __init__(self, *args, instance=None, **kwargs):
+        self._instance = instance
+        super().__init__(*args, **kwargs)
+        self.fields["provider"].queryset = SecretProvider.objects.all().order_by("name")
+        if instance is not None and not self.is_bound:
+            self.fields["source"].initial = instance.source
+            self.fields["provider"].initial = instance.provider_id
+            self.fields["external_ref"].initial = instance.external_ref
+            self.fields["description"].initial = instance.description
+
+    # required=False so a POST that omits it means today's local secret — keeps
+    # every existing caller (and existing test) byte-for-byte; clean() normalizes.
+    source = forms.ChoiceField(
+        choices=Secret.Source.choices,
+        initial=Secret.Source.LOCAL,
+        required=False,
+        widget=forms.Select(attrs={"class": INPUT_CLASS}),
+        label="Value source",
+    )
 
     value = forms.CharField(
         required=False,
@@ -771,6 +856,28 @@ class SecretEditForm(forms.Form):
         help_text="Leave blank to keep the current value",
     )
 
+    provider = forms.ModelChoiceField(
+        queryset=SecretProvider.objects.none(),
+        required=False,
+        empty_label="— select a provider —",
+        widget=forms.Select(attrs={"class": INPUT_CLASS}),
+        label="Provider",
+    )
+
+    external_ref = forms.CharField(
+        required=False,
+        max_length=500,
+        widget=forms.TextInput(
+            attrs={
+                "class": INPUT_CLASS + " font-mono",
+                "placeholder": "path/to/secret#key",
+                "autocomplete": "off",
+            }
+        ),
+        label="Reference",
+        help_text="Reference to the value within the provider (e.g. a Vault path#key).",
+    )
+
     description = forms.CharField(
         required=False,
         widget=forms.Textarea(
@@ -783,6 +890,9 @@ class SecretEditForm(forms.Form):
         label="Description",
     )
 
+    def clean_external_ref(self):
+        return (self.cleaned_data.get("external_ref") or "").strip()
+
     def clean_value(self):
         """Validate the secret value if provided."""
         value = self.cleaned_data.get("value", "")
@@ -793,6 +903,29 @@ class SecretEditForm(forms.Form):
             )
 
         return value
+
+    def clean(self):
+        cleaned = super().clean()
+        source = cleaned.get("source") or Secret.Source.LOCAL
+        cleaned["source"] = source  # normalize blank → local for the view
+        if source == Secret.Source.EXTERNAL:
+            if not cleaned.get("provider"):
+                self.add_error("provider", "Select a provider for an external secret.")
+            if not cleaned.get("external_ref"):
+                self.add_error(
+                    "external_ref", "A reference is required for an external secret."
+                )
+        else:  # local
+            # A value may be omitted only when the row already holds a stored local
+            # value to keep; switching from external → local must supply one.
+            has_stored_local = bool(
+                self._instance
+                and self._instance.source == Secret.Source.LOCAL
+                and self._instance.encrypted_value
+            )
+            if not cleaned.get("value") and not has_stored_local:
+                self.add_error("value", "Secret value is required.")
+        return cleaned
 
 
 class NotificationSettingsForm(forms.Form):
@@ -988,20 +1121,6 @@ class NotificationSettingsForm(forms.Form):
 class GeneralSettingsForm(forms.Form):
     """Form for general instance settings."""
 
-    from core.models import GlobalSettings
-
-    DATE_FORMAT_CHOICES = [
-        (GlobalSettings.DateFormat.ISO, "YYYY-MM-DD (ISO)"),
-        (GlobalSettings.DateFormat.US, "MM/DD/YYYY (US)"),
-        (GlobalSettings.DateFormat.EU, "DD/MM/YYYY (EU)"),
-        (GlobalSettings.DateFormat.DOT, "DD.MM.YYYY"),
-    ]
-
-    TIME_FORMAT_CHOICES = [
-        (GlobalSettings.TimeFormat.H24, "24-hour (14:30)"),
-        (GlobalSettings.TimeFormat.H12, "12-hour (2:30 PM)"),
-    ]
-
     instance_name = forms.CharField(
         max_length=100,
         required=False,
@@ -1024,27 +1143,7 @@ class GeneralSettingsForm(forms.Form):
             }
         ),
         label="Timezone",
-        help_text="Default timezone for displaying dates and times",
-    )
-
-    date_format = forms.ChoiceField(
-        choices=DATE_FORMAT_CHOICES,
-        widget=forms.Select(
-            attrs={
-                "class": INPUT_CLASS,
-            }
-        ),
-        label="Date Format",
-    )
-
-    time_format = forms.ChoiceField(
-        choices=TIME_FORMAT_CHOICES,
-        widget=forms.Select(
-            attrs={
-                "class": INPUT_CLASS,
-            }
-        ),
-        label="Time Format",
+        help_text="Times in the console and scheduled backup times use this timezone",
     )
 
     admin_url_slug = forms.CharField(
@@ -1087,19 +1186,15 @@ class GeneralSettingsForm(forms.Form):
         if instance:
             self.fields["instance_name"].initial = instance.instance_name
             self.fields["timezone"].initial = instance.timezone
-            self.fields["date_format"].initial = instance.date_format
-            self.fields["time_format"].initial = instance.time_format
             self.fields["admin_url_slug"].initial = instance.admin_url_slug
 
     def save(self, instance):
         """Save the general settings to the GlobalSettings instance."""
         instance.instance_name = self.cleaned_data.get("instance_name") or "PyRunner"
         instance.timezone = self.cleaned_data.get("timezone") or "UTC"
-        instance.date_format = self.cleaned_data.get("date_format")
-        instance.time_format = self.cleaned_data.get("time_format")
         instance.admin_url_slug = self.cleaned_data.get("admin_url_slug") or "django-admin"
         instance.save(update_fields=[
-            "instance_name", "timezone", "date_format", "time_format", "admin_url_slug", "updated_at"
+            "instance_name", "timezone", "admin_url_slug", "updated_at"
         ])
         return instance
 
@@ -1298,12 +1393,13 @@ class WorkerSettingsForm(forms.Form):
 
 
 class ExecutionIsolationForm(forms.Form):
-    """Form for the script-execution sandbox (FOUNDATIONS Seam 2, Stage 1).
+    """Form for the script-execution sandbox (FOUNDATIONS Seam 2).
 
     Dashboard-managed, stored on ``GlobalSettings`` and resolved per-run at
-    execution time (no restart). Mirrors ``WorkerSettingsForm``. In Stage 1 the
-    resource limits below are active immediately; the isolation *mode* is stored
-    for the later filesystem/network sandbox stage.
+    execution time (no restart). Mirrors ``WorkerSettingsForm``. The resource
+    limits are active immediately; the isolation *mode* selects the filesystem/
+    network sandbox (``SandboxedSubprocessBackend``), resolved per run against the
+    workspace/script policy.
     """
 
     from core.models import GlobalSettings
@@ -1315,8 +1411,8 @@ class ExecutionIsolationForm(forms.Form):
         initial=GlobalSettings.SandboxMode.OFF,
         widget=forms.Select(attrs={"class": INPUT_CLASS}),
         label="Isolation default",
-        help_text="Instance-wide default. Gates the filesystem/network sandbox "
-        "(a later stage); the resource limits below apply regardless.",
+        help_text="Instance-wide default. Gates the filesystem/network sandbox; "
+        "the resource limits below apply regardless.",
     )
 
     sandbox_fail_closed = forms.BooleanField(
@@ -1567,6 +1663,64 @@ class DataStoreForm(forms.ModelForm):
         return name
 
 
+class DatabaseForm(forms.ModelForm):
+    """Form for creating and editing managed databases."""
+
+    def __init__(self, *args, workspace=None, **kwargs):
+        # The active workspace scopes the name-uniqueness check (tenancy: names
+        # are unique per workspace, not globally).
+        self._workspace = workspace
+        super().__init__(*args, **kwargs)
+
+    class Meta:
+        model = Database
+        fields = ["name", "description"]
+        widgets = {
+            "name": forms.TextInput(
+                attrs={
+                    "class": INPUT_CLASS,
+                    "placeholder": "my_database",
+                }
+            ),
+            "description": forms.Textarea(
+                attrs={
+                    "class": INPUT_CLASS,
+                    "rows": 2,
+                    "placeholder": "What is this database used for?",
+                }
+            ),
+        }
+        labels = {
+            "name": "Database Name",
+            "description": "Description",
+        }
+        help_texts = {
+            "name": 'Used in scripts as: pyrunner_db.connect("name")',
+        }
+
+    def clean_name(self):
+        name = self.cleaned_data.get("name", "").strip()
+        if not name:
+            raise forms.ValidationError("Database name is required.")
+        # Identifier-like names only: the Postgres schema/role name is derived
+        # from this (lowercased, hyphens folded to underscores).
+        if not name.replace("_", "").replace("-", "").isalnum():
+            raise forms.ValidationError(
+                "Name can only contain letters, numbers, underscores, and hyphens."
+            )
+        # Check uniqueness within the active workspace (names are per-workspace).
+        qs = Database.objects.filter(name__iexact=name)
+        if self._workspace is not None:
+            qs = qs.filter(workspace=self._workspace)
+        if self.instance.pk:
+            qs = qs.exclude(pk=self.instance.pk)
+        if qs.exists():
+            raise forms.ValidationError(
+                "A database with this name already exists in this workspace."
+            )
+        return name
+
+
 class DataStoreEntryForm(forms.Form):
     """Form for creating and editing data store entries."""
 
@@ -1706,7 +1860,7 @@ class PasswordLoginForm(forms.Form):
     email = forms.EmailField(
         widget=forms.EmailInput(
             attrs={
-                "class": CONSOLE_INPUT_CLASS,
+                "class": INPUT_CLASS,
                 "placeholder": "you@example.com",
                 "autocomplete": "email",
             }
@@ -1716,7 +1870,7 @@ class PasswordLoginForm(forms.Form):
     password = forms.CharField(
         widget=forms.PasswordInput(
             attrs={
-                "class": CONSOLE_INPUT_CLASS,
+                "class": INPUT_CLASS,
                 "placeholder": "Your password",
                 "autocomplete": "current-password",
             }
@@ -1726,24 +1880,30 @@ class PasswordLoginForm(forms.Form):
 
 
 class SetPasswordForm(forms.Form):
-    """Form for setting or changing password."""
+    """Form for setting or changing password.
+
+    Enforces the AUTH_PASSWORD_VALIDATORS policy — the settings-declared
+    validators only apply through an explicit validate_password() call, which
+    lives here. Pass ``user`` so the similarity validator can compare the
+    password against the account's email.
+    """
 
     password = forms.CharField(
         min_length=8,
         widget=forms.PasswordInput(
             attrs={
-                "class": CONSOLE_INPUT_CLASS,
+                "class": INPUT_CLASS,
                 "placeholder": "New password",
                 "autocomplete": "new-password",
             }
         ),
         label="New Password",
-        help_text="Minimum 8 characters",
+        help_text="At least 8 characters, not entirely numeric, and not a common password",
     )
     password_confirm = forms.CharField(
         widget=forms.PasswordInput(
             attrs={
-                "class": CONSOLE_INPUT_CLASS,
+                "class": INPUT_CLASS,
                 "placeholder": "Confirm new password",
                 "autocomplete": "new-password",
             }
@@ -1751,22 +1911,37 @@ class SetPasswordForm(forms.Form):
         label="Confirm Password",
     )
 
+    def __init__(self, *args, user=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.user = user
+
     def clean(self):
+        from django.contrib.auth import password_validation
+
         cleaned_data = super().clean()
         password = cleaned_data.get("password")
         confirm = cleaned_data.get("password_confirm")
         if password and confirm and password != confirm:
             raise forms.ValidationError("Passwords do not match.")
+        if password:
+            try:
+                password_validation.validate_password(password, user=self.user)
+            except forms.ValidationError as exc:
+                self.add_error("password", exc)
         return cleaned_data
 
 
 class AdminSetupForm(forms.Form):
-    """Form for initial admin setup with password."""
+    """Form for initial admin setup with password.
+
+    Enforces AUTH_PASSWORD_VALIDATORS (see SetPasswordForm) — the instance's
+    first superuser deserves at least the standard policy.
+    """
 
     email = forms.EmailField(
         widget=forms.EmailInput(
             attrs={
-                "class": CONSOLE_INPUT_CLASS,
+                "class": INPUT_CLASS,
                 "placeholder": "admin@example.com",
                 "autocomplete": "email",
             }
@@ -1777,18 +1952,18 @@ class AdminSetupForm(forms.Form):
         min_length=8,
         widget=forms.PasswordInput(
             attrs={
-                "class": CONSOLE_INPUT_CLASS,
+                "class": INPUT_CLASS,
                 "placeholder": "Create a strong password",
                 "autocomplete": "new-password",
             }
         ),
         label="Password",
-        help_text="Minimum 8 characters",
+        help_text="At least 8 characters, not entirely numeric, and not a common password",
     )
     password_confirm = forms.CharField(
         widget=forms.PasswordInput(
             attrs={
-                "class": CONSOLE_INPUT_CLASS,
+                "class": INPUT_CLASS,
                 "placeholder": "Confirm password",
                 "autocomplete": "new-password",
             }
@@ -1797,11 +1972,23 @@ class AdminSetupForm(forms.Form):
     )
 
     def clean(self):
+        from django.contrib.auth import password_validation
+
+        from core.models import User
+
         cleaned_data = super().clean()
         password = cleaned_data.get("password")
         confirm = cleaned_data.get("password_confirm")
         if password and confirm and password != confirm:
             raise forms.ValidationError("Passwords do not match.")
+        if password:
+            # Transient (unsaved) user so the similarity validator can compare
+            # against the email being registered.
+            probe = User(email=cleaned_data.get("email") or "")
+            try:
+                password_validation.validate_password(password, user=probe)
+            except forms.ValidationError as exc:
+                self.add_error("password", exc)
         return cleaned_data
 
 
@@ -1825,7 +2012,7 @@ class S3SettingsForm(forms.Form):
         max_length=500,
         widget=forms.TextInput(
             attrs={
-                "class": CONSOLE_INPUT_CLASS,
+                "class": INPUT_CLASS,
                 "placeholder": "https://s3.amazonaws.com or https://minio.example.com:9000",
             }
         ),
@@ -1839,7 +2026,7 @@ class S3SettingsForm(forms.Form):
         initial="us-east-1",
         widget=forms.TextInput(
             attrs={
-                "class": CONSOLE_INPUT_CLASS,
+                "class": INPUT_CLASS,
                 "placeholder": "us-east-1",
             }
         ),
@@ -1851,7 +2038,7 @@ class S3SettingsForm(forms.Form):
         max_length=255,
         widget=forms.TextInput(
             attrs={
-                "class": CONSOLE_INPUT_CLASS,
+                "class": INPUT_CLASS,
                 "placeholder": "my-backup-bucket",
             }
         ),
@@ -1862,7 +2049,7 @@ class S3SettingsForm(forms.Form):
         required=False,
         widget=forms.PasswordInput(
             attrs={
-                "class": CONSOLE_INPUT_CLASS,
+                "class": INPUT_CLASS,
                 "placeholder": "Leave blank to keep current",
                 "autocomplete": "new-password",
             }
@@ -1874,7 +2061,7 @@ class S3SettingsForm(forms.Form):
         required=False,
         widget=forms.PasswordInput(
             attrs={
-                "class": CONSOLE_INPUT_CLASS,
+                "class": INPUT_CLASS,
                 "placeholder": "Leave blank to keep current",
                 "autocomplete": "new-password",
             }
@@ -1946,7 +2133,7 @@ class AISettingsForm(forms.Form):
 
     active_provider = forms.UUIDField(
         required=False,
-        widget=forms.Select(attrs={"class": CONSOLE_INPUT_CLASS}),
+        widget=forms.Select(attrs={"class": INPUT_CLASS}),
         label="Active provider",
         help_text="Used by scripts, Py AI, and connection tests.",
     )
@@ -1963,6 +2150,21 @@ class AISettingsForm(forms.Form):
         if instance:
             self.fields["claude_enabled"].initial = instance.claude_enabled
             self.fields["active_provider"].initial = instance.active_ai_provider_id
+
+    def clean_active_provider(self):
+        # A valid-UUID-but-nonexistent id (e.g. the provider was deleted in
+        # another tab between render and submit) must surface as a form error —
+        # otherwise save() would silently store None ("AI switched off") while
+        # the view reports success.
+        from core.models import AIProvider
+
+        provider_id = self.cleaned_data.get("active_provider")
+        if provider_id and not AIProvider.objects.filter(pk=provider_id).exists():
+            raise forms.ValidationError(
+                "That provider no longer exists — it may have been deleted in "
+                "another tab. Refresh and pick an existing provider."
+            )
+        return provider_id
 
     def save(self, instance):
         """Save AI settings to the GlobalSettings instance."""
@@ -1985,14 +2187,14 @@ class AIProviderForm(forms.Form):
     provider_type = forms.ChoiceField(
         choices=_AIP.ProviderType.choices,
         initial=_AIP.ProviderType.ANTHROPIC,
-        widget=forms.Select(attrs={"class": CONSOLE_INPUT_CLASS}),
+        widget=forms.Select(attrs={"class": INPUT_CLASS}),
         label="Provider",
     )
 
     name = forms.CharField(
         max_length=100,
         widget=forms.TextInput(
-            attrs={"class": CONSOLE_INPUT_CLASS, "placeholder": "e.g. My Z.AI plan"}
+            attrs={"class": INPUT_CLASS, "placeholder": "e.g. My Z.AI plan"}
         ),
         label="Name",
     )
@@ -2001,7 +2203,7 @@ class AIProviderForm(forms.Form):
         required=False,
         max_length=255,
         widget=forms.TextInput(
-            attrs={"class": CONSOLE_INPUT_CLASS, "placeholder": "https://…"}
+            attrs={"class": INPUT_CLASS, "placeholder": "https://…"}
         ),
         label="Endpoint URL",
         help_text="Prefilled per provider; required for custom endpoints. Not used for Anthropic.",
@@ -2011,7 +2213,7 @@ class AIProviderForm(forms.Form):
         required=False,
         choices=_AIP.AuthMethod.choices,
         initial=_AIP.AuthMethod.SUBSCRIPTION,
-        widget=forms.Select(attrs={"class": CONSOLE_INPUT_CLASS}),
+        widget=forms.Select(attrs={"class": INPUT_CLASS}),
         label="Authentication method",
         help_text="Anthropic only: subscription token from `claude setup-token` (starts with sk-ant-oat01-) or an API key from console.anthropic.com.",
     )
@@ -2020,7 +2222,7 @@ class AIProviderForm(forms.Form):
         required=False,
         widget=forms.PasswordInput(
             attrs={
-                "class": CONSOLE_INPUT_CLASS,
+                "class": INPUT_CLASS,
                 "placeholder": "Leave blank to keep current",
                 "autocomplete": "new-password",
             }
@@ -2032,7 +2234,7 @@ class AIProviderForm(forms.Form):
         required=False,
         max_length=100,
         widget=forms.TextInput(
-            attrs={"class": CONSOLE_INPUT_CLASS, "placeholder": "optional"}
+            attrs={"class": INPUT_CLASS, "placeholder": "optional"}
         ),
         label="Default model",
         help_text="Used whenever this provider is active. Blank = account/endpoint default.",
@@ -2114,6 +2316,129 @@ class AIProviderForm(forms.Form):
         return provider
 
 
+class SecretProviderForm(forms.Form):
+    """Create/edit one SecretProvider profile (External Secret Providers).
+
+    The adapter-specific credential/config inputs are NOT declared as Django
+    fields — they arrive as ``f_<name>`` POST keys and are validated against the
+    selected backend's declarative ``fields`` specs. So adding a new adapter needs
+    zero form changes: the registry drives the type dropdown, the rendered inputs,
+    and this validation. Credential fields follow the same preserve-on-edit rule
+    as AIProviderForm (blank keeps the stored value).
+    """
+
+    FIELD_PREFIX = "f_"
+
+    provider_type = forms.ChoiceField(
+        widget=forms.Select(attrs={"class": INPUT_CLASS}),
+        label="Provider",
+    )
+    name = forms.CharField(
+        max_length=100,
+        widget=forms.TextInput(
+            attrs={"class": INPUT_CLASS, "placeholder": "e.g. Prod Vault"}
+        ),
+        label="Name",
+    )
+    cache_ttl = forms.IntegerField(
+        min_value=0,
+        initial=300,
+        widget=forms.NumberInput(attrs={"class": INPUT_CLASS}),
+        label="Cache TTL (seconds)",
+        help_text="How long to cache a fetched value in-process. 0 disables caching.",
+    )
+    on_error = forms.ChoiceField(
+        widget=forms.Select(attrs={"class": INPUT_CLASS}),
+        label="On fetch error",
+        help_text="Fail the run, or serve the last cached value if one exists.",
+    )
+
+    def __init__(self, *args, instance=None, **kwargs):
+        from core.services.secret_backends import list_backends
+
+        super().__init__(*args, **kwargs)
+        self.instance = instance
+        self.fields["provider_type"].choices = [
+            (b.provider_key, b.label or b.provider_key) for b in list_backends()
+        ]
+        self.fields["on_error"].choices = SecretProvider.OnError.choices
+        if instance is not None and not self.is_bound:
+            self.fields["provider_type"].initial = instance.provider_type
+            self.fields["name"].initial = instance.name
+            self.fields["cache_ttl"].initial = instance.cache_ttl
+            self.fields["on_error"].initial = instance.on_error
+
+    def _selected_backend(self):
+        from core.services.secret_backends import SecretResolutionError, get_backend
+
+        ptype = None
+        if self.is_bound:
+            ptype = self.data.get("provider_type")
+        if not ptype and self.instance is not None:
+            ptype = self.instance.provider_type
+        if not ptype:
+            return None
+        try:
+            return get_backend(ptype)
+        except SecretResolutionError:
+            return None
+
+    def clean_provider_type(self):
+        from core.services.secret_backends import SecretResolutionError, get_backend
+
+        ptype = self.cleaned_data["provider_type"]
+        try:
+            get_backend(ptype)
+        except SecretResolutionError:
+            raise forms.ValidationError("Unknown provider type.")
+        return ptype
+
+    def clean_name(self):
+        name = self.cleaned_data["name"].strip()
+        qs = SecretProvider.objects.filter(name__iexact=name)
+        if self.instance:
+            qs = qs.exclude(pk=self.instance.pk)
+        if qs.exists():
+            raise forms.ValidationError("A provider with this name already exists.")
+        return name
+
+    def clean(self):
+        cleaned = super().clean()
+        backend = self._selected_backend()
+        if backend is None:
+            return cleaned
+
+        config = {}
+        # Preserve-on-edit: start from the stored credentials and override only the
+        # fields the user re-typed, so editing config without re-entering secrets works.
+        creds = dict(self.instance.get_credentials()) if self.instance else {}
+        for spec in backend.fields:
+            raw = (self.data.get(self.FIELD_PREFIX + spec["name"], "") or "").strip()
+            if spec.get("kind") == "credential":
+                if raw:
+                    creds[spec["name"]] = raw
+                if spec.get("required") and not creds.get(spec["name"]):
+                    self.add_error(None, f"{spec['label']} is required.")
+            else:  # config
+                config[spec["name"]] = raw
+                if spec.get("required") and not raw:
+                    self.add_error(None, f"{spec['label']} is required.")
+        cleaned["config"] = config
+        cleaned["credentials"] = creds
+        return cleaned
+
+    def save(self):
+        provider = self.instance or SecretProvider()
+        provider.provider_type = self.cleaned_data["provider_type"]
+        provider.name = self.cleaned_data["name"]
+        provider.cache_ttl = self.cleaned_data["cache_ttl"]
+        provider.on_error = self.cleaned_data["on_error"]
+        provider.config = self.cleaned_data.get("config", {})
+        provider.set_credentials(self.cleaned_data.get("credentials", {}))
+        provider.save()
+        return provider
+
+
 class RecaptchaSettingsForm(forms.Form):
     """Form for Google reCAPTCHA v2 login-protection configuration."""
 
@@ -2129,7 +2454,7 @@ class RecaptchaSettingsForm(forms.Form):
         max_length=255,
         widget=forms.TextInput(
             attrs={
-                "class": CONSOLE_INPUT_CLASS + " font-mono",
+                "class": INPUT_CLASS + " font-mono",
                 "placeholder": "6Lc...",
                 "autocomplete": "off",
             }
@@ -2142,7 +2467,7 @@ class RecaptchaSettingsForm(forms.Form):
         required=False,
         widget=forms.PasswordInput(
             attrs={
-                "class": CONSOLE_INPUT_CLASS + " font-mono",
+                "class": INPUT_CLASS + " font-mono",
                 "placeholder": "Leave blank to keep current",
                 "autocomplete": "new-password",
             }
@@ -2231,7 +2556,7 @@ class S3BackupScheduleForm(forms.Form):
         initial=GlobalSettings.S3BackupSchedule.DISABLED,
         widget=forms.Select(
             attrs={
-                "class": CONSOLE_INPUT_CLASS,
+                "class": INPUT_CLASS,
             }
         ),
         label="Schedule Frequency",
@@ -2241,7 +2566,7 @@ class S3BackupScheduleForm(forms.Form):
         initial="02:00",
         widget=forms.TimeInput(
             attrs={
-                "class": CONSOLE_INPUT_CLASS,
+                "class": INPUT_CLASS,
                 "type": "time",
             }
         ),
@@ -2254,7 +2579,7 @@ class S3BackupScheduleForm(forms.Form):
         initial=0,
         widget=forms.Select(
             attrs={
-                "class": CONSOLE_INPUT_CLASS,
+                "class": INPUT_CLASS,
             }
         ),
         label="Day of Week",
@@ -2267,7 +2592,7 @@ class S3BackupScheduleForm(forms.Form):
         initial="pyrunner-backups/",
         widget=forms.TextInput(
             attrs={
-                "class": CONSOLE_INPUT_CLASS,
+                "class": INPUT_CLASS,
                 "placeholder": "pyrunner-backups/",
             }
         ),
@@ -2280,7 +2605,7 @@ class S3BackupScheduleForm(forms.Form):
         initial=7,
         widget=forms.NumberInput(
             attrs={
-                "class": CONSOLE_INPUT_CLASS,
+                "class": INPUT_CLASS,
                 "min": "0",
             }
         ),
@@ -2304,7 +2629,7 @@ class S3BackupScheduleForm(forms.Form):
         initial=1000,
         widget=forms.NumberInput(
             attrs={
-                "class": CONSOLE_INPUT_CLASS,
+                "class": INPUT_CLASS,
                 "min": "0",
             }
         ),
@@ -2370,19 +2695,19 @@ class ChannelForm(forms.Form):
     name = forms.CharField(
         max_length=120,
         widget=forms.TextInput(
-            attrs={"class": CONSOLE_INPUT_CLASS, "placeholder": "Ops Alerts"}
+            attrs={"class": INPUT_CLASS, "placeholder": "Ops Alerts"}
         ),
         help_text="A label for this connection.",
     )
     provider = forms.ChoiceField(
         choices=[],  # populated in __init__ from registered providers
-        widget=forms.Select(attrs={"class": CONSOLE_INPUT_CLASS}),
+        widget=forms.Select(attrs={"class": INPUT_CLASS}),
     )
     bot_token = forms.CharField(
         required=False,
         widget=forms.PasswordInput(
             attrs={
-                "class": CONSOLE_INPUT_CLASS + " font-mono",
+                "class": INPUT_CLASS + " font-mono",
                 "placeholder": "Leave blank to keep current",
                 "autocomplete": "new-password",
             }
@@ -2393,7 +2718,7 @@ class ChannelForm(forms.Form):
     default_target = forms.CharField(
         required=False,
         widget=forms.TextInput(
-            attrs={"class": CONSOLE_INPUT_CLASS + " font-mono", "placeholder": "e.g. 123456789"}
+            attrs={"class": INPUT_CLASS + " font-mono", "placeholder": "e.g. 123456789"}
         ),
         label="Default chat ID",
         help_text="Where notifications are sent. Use 'Find chat ID' after saving.",
@@ -2496,9 +2821,10 @@ class ChannelForm(forms.Form):
 
 
 class ChannelInboundForm(forms.Form):
-    """Configure a channel's inbound handler + approval/cap settings (Phase 2).
+    """Configure a channel's inbound handler + approval/cap settings.
 
-    Phase 2 exposes the ``script`` handler only; ``pyai`` arrives with PLAN_pyai.
+    Both inbound handlers are available: ``script`` (run a script) and ``pyai``
+    (the read-only Py AI assistant).
     """
 
     inbound_enabled = forms.BooleanField(
@@ -2507,12 +2833,12 @@ class ChannelInboundForm(forms.Form):
     inbound_handler = forms.ChoiceField(
         required=False,
         choices=[("", "Notify only (no inbound handling)"), ("script", "Run a script")],
-        widget=forms.Select(attrs={"class": CONSOLE_INPUT_CLASS}),
+        widget=forms.Select(attrs={"class": INPUT_CLASS}),
         label="When a message arrives",
     )
     inbound_target_id = forms.ChoiceField(
         required=False,
-        widget=forms.Select(attrs={"class": CONSOLE_INPUT_CLASS}),
+        widget=forms.Select(attrs={"class": INPUT_CLASS}),
         label="Script to run",
     )
     inbound_access = forms.ChoiceField(
@@ -2520,13 +2846,13 @@ class ChannelInboundForm(forms.Form):
             ("approval", "Approval inbox (recommended) — only approved senders"),
             ("open", "Open — anyone who passes signature verification"),
         ],
-        widget=forms.Select(attrs={"class": CONSOLE_INPUT_CLASS}),
+        widget=forms.Select(attrs={"class": INPUT_CLASS}),
         label="Who can use it",
     )
     daily_reply_cap = forms.IntegerField(
         required=False,
         min_value=0,
-        widget=forms.NumberInput(attrs={"class": CONSOLE_INPUT_CLASS, "min": 0}),
+        widget=forms.NumberInput(attrs={"class": INPUT_CLASS, "min": 0}),
         label="Daily reply cap",
         help_text="Max handler replies per day (0 = unlimited).",
     )
@@ -2581,7 +2907,7 @@ class PyAISettingsForm(forms.Form):
         required=False,
         max_length=100,
         widget=forms.TextInput(
-            attrs={"class": CONSOLE_INPUT_CLASS, "placeholder": "claude-sonnet-4-6 (optional)"}
+            attrs={"class": INPUT_CLASS, "placeholder": "claude-sonnet-4-6 (optional)"}
         ),
         label="Model",
         help_text="Optional. Blank uses the Claude default model.",
@@ -2589,7 +2915,7 @@ class PyAISettingsForm(forms.Form):
     pyai_system_prompt = forms.CharField(
         required=False,
         widget=forms.Textarea(
-            attrs={"class": CONSOLE_INPUT_CLASS, "rows": 3,
+            attrs={"class": INPUT_CLASS, "rows": 3,
                    "placeholder": "Optional extra instruction for Py AI"}
         ),
         label="Extra system instruction",

@@ -66,7 +66,8 @@ SCRIPT_TEMPLATES = {
 AI Web Research example.
 
 Requires:
-  - Claude enabled in PyRunner (Services -> Claude AI)
+  - AI enabled in PyRunner (Services -> AI Provider); web search needs an
+    Anthropic provider (it is served by Anthropic's API)
   - 'claude-agent-sdk' installed in this script's Environment (Environments -> Packages)
 """
 from pyrunner_ai import ask_claude
@@ -223,14 +224,8 @@ def script_edit_view(request: HttpRequest, pk) -> HttpResponse:
         schedule_form = ScheduleForm(request.POST, instance=schedule)
 
         if form.is_valid() and schedule_form.is_valid():
-            # Capture previous config for history
-            previous_config = {
-                "run_mode": schedule.run_mode,
-                "interval_minutes": schedule.interval_minutes,
-                "daily_times": schedule.daily_times,
-                "timezone": schedule.timezone,
-                "is_active": schedule.is_active,
-            }
+            # Capture previous config for history (all modes — see config_snapshot)
+            previous_config = schedule.config_snapshot()
 
             script = form.save(commit=False)
             script.save()
@@ -240,13 +235,7 @@ def script_edit_view(request: HttpRequest, pk) -> HttpResponse:
             schedule = schedule_form.save()
 
             # Capture new config
-            new_config = {
-                "run_mode": schedule.run_mode,
-                "interval_minutes": schedule.interval_minutes,
-                "daily_times": schedule.daily_times,
-                "timezone": schedule.timezone,
-                "is_active": schedule.is_active,
-            }
+            new_config = schedule.config_snapshot()
 
             # Create history entry if changed
             if previous_config != new_config:

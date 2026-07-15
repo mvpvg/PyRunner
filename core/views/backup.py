@@ -4,18 +4,14 @@ Views for backup and restore functionality.
 from datetime import datetime
 
 from django.contrib import messages
-from django.contrib.auth.decorators import login_required, user_passes_test
+from django.contrib.auth.decorators import login_required
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import redirect
 from django.views.decorators.http import require_POST
 
-
-def superuser_required(view_func):
-    """Decorator to require superuser status for backup operations."""
-    return user_passes_test(lambda u: u.is_superuser, login_url="auth:login")(view_func)
-
 from core.forms import BackupCreateForm, BackupRestoreForm
 from core.services.backup_service import BackupService
+from core.views.decorators import superuser_required
 
 
 @login_required

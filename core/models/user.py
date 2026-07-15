@@ -3,12 +3,15 @@ User, MagicToken, and PasswordResetToken models for authentication.
 Supports both password-based and magic link authentication.
 """
 
+import logging
 import secrets
 from datetime import timedelta
 
 from django.contrib.auth.models import AbstractUser
 from django.db import models
 from django.utils import timezone
+
+logger = logging.getLogger(__name__)
 
 
 class User(AbstractUser):
@@ -127,7 +130,12 @@ class MagicToken(models.Model):
 
                 WorkspaceMembership.ensure(user, role=WorkspaceMembership.ROLE_OWNER)
             except Exception:
-                pass
+                logger.warning(
+                    "Failed to upgrade bootstrap admin %s to workspace owner; "
+                    "they remain a plain member.",
+                    user.pk,
+                    exc_info=True,
+                )
 
         # Create new token
         return cls.objects.create(

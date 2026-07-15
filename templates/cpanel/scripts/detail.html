@@ -185,13 +185,13 @@
                         {% if schedule.next_run %}
                         <div class="flex items-center justify-between gap-3">
                             <dt class="text-muted">Next run</dt>
-                            <dd class="font-mono text-text text-xs">{{ schedule.next_run|date:"M d, H:i" }} UTC</dd>
+                            <dd class="font-mono text-text text-xs">{{ schedule.next_run|date:"M d, H:i" }}</dd>
                         </div>
                         {% endif %}
                         {% if schedule.last_scheduled_run %}
                         <div class="flex items-center justify-between gap-3">
                             <dt class="text-muted">Last run</dt>
-                            <dd class="font-mono text-text text-xs">{{ schedule.last_scheduled_run|date:"M d, H:i" }} UTC</dd>
+                            <dd class="font-mono text-text text-xs">{{ schedule.last_scheduled_run|date:"M d, H:i" }}</dd>
                         </div>
                         {% endif %}
                     </dl>

@@ -2,22 +2,18 @@
 User management views for admin users.
 """
 from django.shortcuts import render, redirect, get_object_or_404
-from django.contrib.auth.decorators import login_required, user_passes_test
+from django.contrib.auth.decorators import login_required
 from django.contrib import messages
 from django.views.decorators.http import require_http_methods, require_POST
 from django.urls import reverse
 from django.http import HttpRequest, HttpResponse
 
 from core.models import User, UserInvite
-
-
-def is_admin(user):
-    """Check if user is an admin (superuser)."""
-    return user.is_superuser
+from core.views.decorators import superuser_required
 
 
 @login_required
-@user_passes_test(is_admin)
+@superuser_required
 def user_list_view(request: HttpRequest) -> HttpResponse:
     """List all users and pending invites."""
     users = User.objects.all().order_by("-date_joined")
@@ -36,7 +32,7 @@ def user_list_view(request: HttpRequest) -> HttpResponse:
 
 
 @login_required
-@user_passes_test(is_admin)
+@superuser_required
 @require_http_methods(["GET", "POST"])
 def invite_user_view(request: HttpRequest) -> HttpResponse:
     """Create a new user invite."""
@@ -80,7 +76,7 @@ def invite_user_view(request: HttpRequest) -> HttpResponse:
 
 
 @login_required
-@user_passes_test(is_admin)
+@superuser_required
 @require_POST
 def revoke_invite_view(request: HttpRequest, pk: int) -> HttpResponse:
     """Revoke/delete an unused invite."""
@@ -92,7 +88,7 @@ def revoke_invite_view(request: HttpRequest, pk: int) -> HttpResponse:
 
 
 @login_required
-@user_passes_test(is_admin)
+@superuser_required
 @require_POST
 def delete_user_view(request: HttpRequest, pk: int) -> HttpResponse:
     """Delete a user (cannot delete self)."""

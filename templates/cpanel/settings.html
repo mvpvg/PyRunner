@@ -37,7 +37,7 @@
                         <!-- Primary column: instance identity & formatting -->
                         <div class="lg:col-span-7 bg-panel border border-line rounded-2xl p-6">
                             <h3 class="text-base font-semibold text-text mb-1">Instance</h3>
-                            <p class="text-sm text-muted mb-5">Name your instance and choose how dates and times are displayed across the console.</p>
+                            <p class="text-sm text-muted mb-5">Name your instance and choose the timezone times are displayed in across the console.</p>
                             <div class="space-y-4">
                                 <div>
                                     <label class="block text-[13px] font-medium text-text mb-1.5">{{ general_form.instance_name.label }}</label>
@@ -48,16 +48,6 @@
                                     <label class="block text-[13px] font-medium text-text mb-1.5">{{ general_form.timezone.label }}</label>
                                     {{ general_form.timezone }}
                                     <p class="mt-1.5 text-xs text-faint">{{ general_form.timezone.help_text }}</p>
-                                </div>
-                                <div class="grid grid-cols-2 gap-4">
-                                    <div>
-                                        <label class="block text-[13px] font-medium text-text mb-1.5">{{ general_form.date_format.label }}</label>
-                                        {{ general_form.date_format }}
-                                    </div>
-                                    <div>
-                                        <label class="block text-[13px] font-medium text-text mb-1.5">{{ general_form.time_format.label }}</label>
-                                        {{ general_form.time_format }}
-                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -1042,6 +1032,7 @@ function showRestorePreview(preview, warnings) {
     html += '<div>• Scripts: <strong>' + escapeHtml(String(preview.counts.scripts)) + '</strong></div>';
     html += '<div>• Environments: <strong>' + escapeHtml(String(preview.counts.environments)) + '</strong></div>';
     html += '<div>• Secrets: <strong>' + escapeHtml(String(preview.counts.secrets)) + '</strong></div>';
+    html += '<div>• Secret providers: <strong>' + escapeHtml(String(preview.counts.secret_providers || 0)) + '</strong></div>';
     html += '<div>• Runs: <strong>' + escapeHtml(String(preview.counts.runs)) + '</strong></div>';
     html += '<div>• Schedules: <strong>' + escapeHtml(String(preview.counts.schedules)) + '</strong></div>';
     html += '<div>• Users: <strong>' + escapeHtml(String(preview.counts.users)) + '</strong></div>';

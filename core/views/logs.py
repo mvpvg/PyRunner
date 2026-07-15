@@ -4,26 +4,20 @@ Log viewer views for the control panel.
 import logging
 from datetime import datetime
 
-from django.contrib.auth.decorators import login_required, user_passes_test
+from django.contrib.auth.decorators import login_required
 from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.shortcuts import render
 from django.views.decorators.http import require_POST
 
 from core.services.log_service import LogService
+from core.views.decorators import superuser_required
 
 logger = logging.getLogger(__name__)
 
 
-def superuser_required(view_func):
-    """Require superuser status.
-
-    The application log is a single shared, non-workspace-scoped file: it mixes
-    every workspace's run activity and exception output, so reading it is
-    admin-only (matching the destructive ``logs_clear_view`` sibling).
-    """
-    return user_passes_test(lambda u: u.is_superuser, login_url="auth:login")(view_func)
-
-
+# The application log is a single shared, non-workspace-scoped file: it mixes
+# every workspace's run activity and exception output, so reading it is
+# admin-only (matching the destructive ``logs_clear_view`` sibling).
 @login_required
 @superuser_required
 def logs_view(request: HttpRequest) -> HttpResponse:

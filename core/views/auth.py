@@ -5,7 +5,7 @@ invite onboarding uses a set-password flow (no passwordless login surface).
 import logging
 
 from django.shortcuts import render, redirect
-from django.contrib.auth import authenticate, login, logout
+from django.contrib.auth import authenticate, login, logout, update_session_auth_hash
 from django.contrib.auth.decorators import login_required
 from django.contrib import messages
 from django.views.decorators.http import require_http_methods, require_POST
@@ -130,7 +130,13 @@ def accept_invite_view(request: HttpRequest, token: str) -> HttpResponse:
         })
 
     if request.method == "POST":
-        form = SetPasswordForm(request.POST)
+        # A transient User carries the invite email into the similarity
+        # validator even when the account doesn't exist yet.
+        form = SetPasswordForm(
+            request.POST,
+            user=User.objects.filter(email=invite.email).first()
+            or User(email=invite.email),
+        )
         if form.is_valid():
             # Create/activate the invited account WITH a password. get_or_create
             # keeps the post-save membership signal in play (invitee -> member).
@@ -167,14 +173,17 @@ def accept_invite_view(request: HttpRequest, token: str) -> HttpResponse:
 def change_password_view(request: HttpRequest) -> HttpResponse:
     """Allow users to set or change their password."""
     if request.method == "POST":
-        form = SetPasswordForm(request.POST)
+        form = SetPasswordForm(request.POST, user=request.user)
         if form.is_valid():
             password = form.cleaned_data["password"]
             request.user.set_password(password)
             request.user.save()
 
-            # Re-authenticate to update session
-            login(request, request.user)
+            # Keep the session valid after the hash change. login() without a
+            # backend argument would crash here — with multiple auth backends
+            # configured (axes + ModelBackend), Django requires an explicit
+            # backend for session-loaded users.
+            update_session_auth_hash(request, request.user)
             messages.success(request, "Password updated successfully.")
             return redirect("cpanel:settings")
     else:
@@ -248,7 +257,7 @@ def reset_password_view(request: HttpRequest, token: str) -> HttpResponse:
         })
 
     if request.method == "POST":
-        form = SetPasswordForm(request.POST)
+        form = SetPasswordForm(request.POST, user=reset_token.user)
         if form.is_valid():
             user = reset_token.consume()
             user.set_password(form.cleaned_data["password"])

@@ -18,7 +18,8 @@ class Secret(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
 
-    # Tenancy seam (Phase A): nullable, backfilled to the default workspace.
+    # Tenancy: nullable + backfilled to the default workspace for upgrade-safety;
+    # queries scope through WorkspaceScopedManager (.for_workspace).
     workspace = models.ForeignKey(
         "core.Workspace",
         on_delete=models.SET_NULL,
@@ -61,9 +62,46 @@ class Secret(models.Model):
         help_text="Stable per-owner handle for idempotent upsert (NULL = unmanaged).",
     )
 
-    # Encrypted value - stores the Fernet-encrypted bytes as base64 string
+    # Where this secret's VALUE comes from (External Secret Providers). "local"
+    # (default) = today's path, byte-for-byte: Fernet-decrypt ``encrypted_value``.
+    # "external" = fetch live at run time from ``provider`` using ``external_ref``.
+    class Source(models.TextChoices):
+        LOCAL = "local", "Stored value"
+        EXTERNAL = "external", "External provider"
+
+    source = models.CharField(
+        max_length=20,
+        choices=Source.choices,
+        default=Source.LOCAL,
+        help_text="Where the value comes from: a locally-stored encrypted value, "
+        "or a live fetch from an external secrets provider.",
+    )
+
+    # The external provider profile this row resolves through (external rows only).
+    # PROTECT, not SET_NULL: deleting a profile that secrets still reference must be
+    # an explicit, guided act — SET_NULL would silently orphan rows into
+    # unresolvable secrets.
+    provider = models.ForeignKey(
+        "core.SecretProvider",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="secrets",
+        help_text="External provider profile (external rows only).",
+    )
+
+    # Provider-specific reference to the value, e.g. "kv/myapp#API_KEY" for Vault.
+    external_ref = models.CharField(
+        max_length=500,
+        blank=True,
+        help_text="Reference to the value within the provider (external rows only).",
+    )
+
+    # Encrypted value - stores the Fernet-encrypted bytes as base64 string.
+    # Blank for external rows (they store no value locally).
     encrypted_value = models.TextField(
-        help_text="Fernet-encrypted secret value",
+        blank=True,
+        help_text="Fernet-encrypted secret value (blank for external rows)",
     )
 
     # Optional description to help remember what this secret is for
@@ -138,10 +176,17 @@ class Secret(models.Model):
 
     def get_masked_value(self) -> str:
         """
-        Return a masked preview of the decrypted value.
-        Shows first 3 and last 3 characters with ... in between.
-        Example: "sk-abc123xyz789" -> "sk-...789"
+        Return a masked preview of the value.
+
+        External rows show the REFERENCE ("{provider_type}: {external_ref}"), never
+        the fetched value — the secrets list must never trigger N live HTTP calls
+        on a page load. Local rows show first 3 / last 3 chars of the decrypted
+        value, e.g. "sk-abc123xyz789" -> "sk-...789".
         """
+        if self.source == self.Source.EXTERNAL:
+            ptype = self.provider.provider_type if self.provider_id else "external"
+            return f"{ptype}: {self.external_ref}"
+
         from core.services import EncryptionService
 
         try:
@@ -153,7 +198,31 @@ class Secret(models.Model):
             return "[decryption error]"
 
     def get_decrypted_value(self) -> str:
-        """Return the decrypted secret value."""
+        """Return the secret value, dispatching on ``source``.
+
+        Local rows Fernet-decrypt the stored value (today's path). External rows
+        fetch live from the provider; a failure raises ``SecretResolutionError``
+        wrapped with this secret's name + provider so the run fails pre-exec with a
+        clear, named error (fail-closed).
+        """
+        if self.source == self.Source.EXTERNAL:
+            from core.services.secret_backends import (
+                SecretResolutionError,
+                resolve_secret_ref,
+            )
+
+            if self.provider_id is None:
+                raise SecretResolutionError(
+                    f"Secret {self.key} is marked external but has no provider profile"
+                )
+            try:
+                return resolve_secret_ref(self.provider, self.external_ref)
+            except SecretResolutionError as e:
+                raise SecretResolutionError(
+                    f"Secret {self.key} could not be resolved from provider "
+                    f"'{self.provider.name}' ({self.provider.provider_type}): {e}"
+                ) from e
+
         from core.services import EncryptionService
 
         return EncryptionService.decrypt(self.encrypted_value)

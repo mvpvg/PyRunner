@@ -5,7 +5,7 @@ import logging
 
 from django.shortcuts import render, redirect
 from django.urls import reverse
-from django.contrib.auth.decorators import login_required, user_passes_test
+from django.contrib.auth.decorators import login_required
 from django.contrib import messages
 from django.views.decorators.http import require_POST
 from django.http import HttpRequest, HttpResponse, JsonResponse
@@ -27,13 +27,9 @@ from core.forms import (
     S3BackupScheduleForm,
     RecaptchaSettingsForm,
 )
+from core.views.decorators import superuser_required
 
 logger = logging.getLogger(__name__)
-
-
-def superuser_required(view_func):
-    """Decorator to require superuser status for settings operations."""
-    return user_passes_test(lambda u: u.is_superuser, login_url="auth:login")(view_func)
 
 
 @login_required
@@ -113,6 +109,15 @@ def notification_settings_view(request: HttpRequest) -> HttpResponse:
 @require_POST
 def test_email_view(request: HttpRequest) -> JsonResponse:
     """Send a test email to verify configuration."""
+    # JSON endpoint (called via fetch): an in-body superuser check returns a 403
+    # JSON body rather than a login redirect, matching the other settings
+    # endpoints (sandbox probe, restart workers). Without it any logged-in member
+    # could fire test emails at the configured admin address.
+    if not request.user.is_superuser:
+        return JsonResponse(
+            {"success": False, "error": "Permission denied."}, status=403
+        )
+
     settings = GlobalSettings.get_settings()
 
     if settings.email_backend == GlobalSettings.EmailBackend.DISABLED:
@@ -305,9 +310,11 @@ def restart_workers_view(request: HttpRequest) -> JsonResponse:
         )
 
         if result.returncode == 0:
+            # Exit 0 means the command CONFIRMED a new worker PID — not just
+            # that a signal was sent.
             return JsonResponse({
                 "success": True,
-                "message": "Workers restart initiated successfully.",
+                "message": "Workers restarted.",
                 "output": result.stdout,
             })
         else:

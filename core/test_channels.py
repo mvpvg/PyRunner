@@ -267,12 +267,56 @@ class InternalSendEndpointTests(_EncBase):
         self.assertEqual(resp.status_code, 200)
         m.assert_called_once()
 
-    def test_rate_limited(self):
-        from core.views.api.channels_internal import _RUN_SEND_LIMIT
+    def test_channel_send_logs_outbound_message(self):
+        # Review 4b.1: a script handler's async reply (via this endpoint) must be
+        # recorded as an OUT ChannelMessage — otherwise it's absent from history
+        # and never counts toward the daily cap.
+        ch = self._channel(name="Ops", token="a:1")
+        with mock.patch.object(ChannelService, "send", return_value={"ok": True}):
+            self._post({"target": "Ops", "text": "hello", "reply_ref": {"chat_id": "5"}})
+        out = ChannelMessage.objects.filter(channel=ch, direction=ChannelMessage.Direction.OUT)
+        self.assertEqual(out.count(), 1)
+        row = out.first()
+        self.assertEqual(row.text, "hello")
+        self.assertEqual(row.status, "ok")
+        self.assertEqual(row.reply_ref_json, {"chat_id": "5"})
 
-        cache.set(f"channel_send_rate_{self.run.id}", _RUN_SEND_LIMIT, 60)
-        resp = self._post({"target": "email", "text": "x"})
-        self.assertEqual(resp.status_code, 429)
+    def test_outbound_send_counts_toward_daily_cap(self):
+        ch = self._channel(name="Ops", token="a:1")
+        ch.daily_reply_cap = 1
+        ch.save()
+        self.assertFalse(ch.daily_cap_reached())
+        with mock.patch.object(ChannelService, "send", return_value={"ok": True}):
+            self._post({"target": "Ops", "text": "one"})
+        self.assertEqual(ch.replies_today(), 1)
+        self.assertTrue(ch.daily_cap_reached())
+
+    def test_failed_send_logs_error_row(self):
+        ch = self._channel(name="Ops", token="a:1")
+        with mock.patch.object(ChannelService, "send", side_effect=ChannelError("boom")):
+            resp = self._post({"target": "Ops", "text": "hi"})
+        self.assertEqual(resp.status_code, 502)
+        err = ChannelMessage.objects.filter(
+            channel=ch, direction=ChannelMessage.Direction.OUT, status="error"
+        )
+        self.assertEqual(err.count(), 1)
+        self.assertIn("boom", err.first().error)
+
+    def test_email_send_logs_no_channel_message(self):
+        with mock.patch.object(NotificationService, "send_email", return_value=True):
+            self._post({"target": "email", "text": "body"})
+        self.assertEqual(ChannelMessage.objects.count(), 0)
+
+    def test_rate_limited(self):
+        # Exercise the real limiter (fixed-window helper) instead of seeding
+        # cache internals: with the per-run cap patched to 1, the second send
+        # in the window must 429.
+        with mock.patch("core.views.api.channels_internal._RUN_SEND_LIMIT", 1):
+            with mock.patch.object(NotificationService, "send_email", return_value=True):
+                first = self._post({"target": "email", "text": "x"})
+            second = self._post({"target": "email", "text": "x"})
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 429)
 
 
 class ChannelFormTests(_EncBase):

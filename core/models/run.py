@@ -37,7 +37,8 @@ class Run(models.Model):
         related_name="runs",
     )
 
-    # Tenancy seam (Phase A): nullable, backfilled to the default workspace.
+    # Tenancy: nullable + backfilled to the default workspace for upgrade-safety;
+    # queries scope through WorkspaceScopedManager (.for_workspace).
     workspace = models.ForeignKey(
         "core.Workspace",
         on_delete=models.SET_NULL,
@@ -150,18 +151,9 @@ class Run(models.Model):
     @property
     def duration_display(self) -> str:
         """Return a human-readable duration string."""
-        d = self.duration
-        if d is None:
-            return "-"
-        if d < 60:
-            return f"{d:.1f}s"
-        minutes = int(d // 60)
-        seconds = d % 60
-        if minutes < 60:
-            return f"{minutes}m {seconds:.0f}s"
-        hours = minutes // 60
-        minutes = minutes % 60
-        return f"{hours}h {minutes}m"
+        from core.formatting import format_duration
+
+        return format_duration(self.duration)
 
     @property
     def is_finished(self) -> bool:

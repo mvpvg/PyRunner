@@ -127,7 +127,7 @@ class PyAIRuntimeTests(TestCase):
 
     def test_is_available(self):
         with mock.patch.object(ClaudeService, "is_configured", return_value=True), \
-                mock.patch.object(ClaudeService, "_cli_available", return_value=True):
+                mock.patch.object(ClaudeService, "cli_available", return_value=True):
             self.assertTrue(PyAIService.is_available())
         with mock.patch.object(ClaudeService, "is_configured", return_value=False):
             self.assertFalse(PyAIService.is_available())

@@ -189,16 +189,28 @@
                                 <div class="h-1.5 rounded-full bg-line overflow-hidden">
                                     <div id="cpuBar" class="h-full rounded-full {% if system_resources.cpu.percent >= 90 %}bg-fail{% elif system_resources.cpu.percent >= 70 %}bg-warn{% else %}bg-ok{% endif %}" style="width: {{ system_resources.cpu.percent }}%"></div>
                                 </div>
+                                {% if system_resources.in_container %}
+                                <div class="mt-1.5 flex items-baseline justify-between text-xs text-faint">
+                                    <span>VPS</span>
+                                    <span id="cpuHostValue" class="font-mono tnum">{{ system_resources.host.cpu.percent|floatformat:1 }}%</span>
+                                </div>
+                                {% endif %}
                             </div>
                             <!-- RAM -->
                             <div>
                                 <div class="flex items-baseline justify-between mb-2">
-                                    <span class="text-[13px] text-muted">Memory <span id="ramDetails" class="text-faint font-mono">{{ system_resources.memory.used_display }} / {{ system_resources.memory.total_display }}</span></span>
+                                    <span class="text-[13px] text-muted">Memory <span id="ramDetails" class="text-faint font-mono">{{ system_resources.memory.used_display }} / {{ system_resources.memory.total_display }}{% if system_resources.memory.is_limit %} limit{% endif %}</span></span>
                                     <span id="ramValue" class="font-mono tnum text-sm font-semibold {% if system_resources.memory.percent >= 90 %}text-fail{% elif system_resources.memory.percent >= 70 %}text-warn{% else %}text-ok{% endif %}">{{ system_resources.memory.percent|floatformat:1 }}%</span>
                                 </div>
                                 <div class="h-1.5 rounded-full bg-line overflow-hidden">
                                     <div id="ramBar" class="h-full rounded-full {% if system_resources.memory.percent >= 90 %}bg-fail{% elif system_resources.memory.percent >= 70 %}bg-warn{% else %}bg-ok{% endif %}" style="width: {{ system_resources.memory.percent }}%"></div>
                                 </div>
+                                {% if system_resources.in_container %}
+                                <div class="mt-1.5 flex items-baseline justify-between text-xs text-faint">
+                                    <span>VPS</span>
+                                    <span id="ramHostValue" class="font-mono tnum">{{ system_resources.host.memory.used_display }} / {{ system_resources.host.memory.total_display }} · {{ system_resources.host.memory.percent|floatformat:1 }}%</span>
+                                </div>
+                                {% endif %}
                             </div>
                             <!-- Disk -->
                             <div>
@@ -314,9 +326,19 @@
 
             updateMetric(document.getElementById('cpuValue'), document.getElementById('cpuBar'), data.cpu.percent);
             updateMetric(document.getElementById('ramValue'), document.getElementById('ramBar'), data.memory.percent,
-                data.memory.used_display + ' / ' + data.memory.total_display, document.getElementById('ramDetails'));
+                data.memory.used_display + ' / ' + data.memory.total_display + (data.memory.is_limit ? ' limit' : ''),
+                document.getElementById('ramDetails'));
             updateMetric(document.getElementById('diskValue'), document.getElementById('diskBar'), data.disk.percent,
                 data.disk.used_display + ' / ' + data.disk.total_display, document.getElementById('diskDetails'));
+
+            // Host (VPS) sub-lines — only rendered when running in a container.
+            if (data.host) {
+                const cpuHost = document.getElementById('cpuHostValue');
+                if (cpuHost) cpuHost.textContent = data.host.cpu.percent.toFixed(1) + '%';
+                const ramHost = document.getElementById('ramHostValue');
+                if (ramHost) ramHost.textContent = data.host.memory.used_display + ' / ' +
+                    data.host.memory.total_display + ' · ' + data.host.memory.percent.toFixed(1) + '%';
+            }
         } catch (error) {
             console.error('Failed to refresh system resources:', error);
         }

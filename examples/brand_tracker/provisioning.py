@@ -246,8 +246,8 @@ def provision(data, *, created_by=None):
     if provider == "claude" and "claude-agent-sdk" not in reqs:
         warnings.append(
             f"AI enrichment uses Claude, but environment '{env.name}' may be missing "
-            "'claude-agent-sdk'. Add it under Environments (and enable Claude under "
-            "Services → Claude AI) or mentions will be stored without sentiment."
+            "'claude-agent-sdk'. Add it under Environments (and enable AI under "
+            "Services → AI Provider) or mentions will be stored without sentiment."
         )
     if provider == "openrouter":
         has_or = (data.get("openrouter_api_key") or "").strip() or "OPENROUTER_API_KEY" in configured_secret_keys()

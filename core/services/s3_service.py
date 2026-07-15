@@ -148,6 +148,27 @@ class S3Service:
 
         return boto3.client(**client_kwargs)
 
+    @staticmethod
+    def _map_boto3_error(error_msg: str, bucket_name: str) -> str:
+        """Map a boto3/botocore error string to a friendly, actionable message.
+
+        Shared by both connection tests so their error handling can't drift.
+        """
+        if "NoSuchBucket" in error_msg:
+            return f"Bucket '{bucket_name}' does not exist"
+        if "AccessDenied" in error_msg or "403" in error_msg:
+            return "Access denied. Check your credentials and bucket permissions"
+        if "InvalidAccessKeyId" in error_msg:
+            return "Invalid access key ID"
+        if "SignatureDoesNotMatch" in error_msg:
+            return "Invalid secret access key"
+        if "EndpointConnectionError" in error_msg or "ConnectTimeoutError" in error_msg:
+            return "Cannot connect to endpoint. Check URL and network connectivity"
+        if "InvalidEndpoint" in error_msg:
+            return "Invalid endpoint URL format"
+        logger.exception("S3 connection test failed")
+        return f"Connection failed: {error_msg}"
+
     @classmethod
     def test_connection(cls) -> Tuple[bool, str]:
         """
@@ -175,29 +196,7 @@ class S3Service:
         except S3ServiceError as e:
             return False, str(e)
         except Exception as e:
-            error_msg = str(e)
-            # Parse common boto3 errors for better messages
-            if "NoSuchBucket" in error_msg:
-                return False, f"Bucket '{settings.s3_bucket_name}' does not exist"
-            elif "AccessDenied" in error_msg or "403" in error_msg:
-                return (
-                    False,
-                    "Access denied. Check your credentials and bucket permissions",
-                )
-            elif "InvalidAccessKeyId" in error_msg:
-                return False, "Invalid access key ID"
-            elif "SignatureDoesNotMatch" in error_msg:
-                return False, "Invalid secret access key"
-            elif "EndpointConnectionError" in error_msg or "ConnectTimeoutError" in error_msg:
-                return (
-                    False,
-                    "Cannot connect to endpoint. Check URL and network connectivity",
-                )
-            elif "InvalidEndpoint" in error_msg:
-                return False, "Invalid endpoint URL format"
-            else:
-                logger.exception("S3 connection test failed")
-                return False, f"Connection failed: {error_msg}"
+            return False, cls._map_boto3_error(str(e), settings.s3_bucket_name)
 
     @classmethod
     def test_connection_with_credentials(
@@ -274,29 +273,7 @@ class S3Service:
             return True, f"Successfully connected to bucket '{bucket_name}'"
 
         except Exception as e:
-            error_msg = str(e)
-            # Parse common boto3 errors for better messages
-            if "NoSuchBucket" in error_msg:
-                return False, f"Bucket '{bucket_name}' does not exist"
-            elif "AccessDenied" in error_msg or "403" in error_msg:
-                return (
-                    False,
-                    "Access denied. Check your credentials and bucket permissions",
-                )
-            elif "InvalidAccessKeyId" in error_msg:
-                return False, "Invalid access key ID"
-            elif "SignatureDoesNotMatch" in error_msg:
-                return False, "Invalid secret access key"
-            elif "EndpointConnectionError" in error_msg or "ConnectTimeoutError" in error_msg:
-                return (
-                    False,
-                    "Cannot connect to endpoint. Check URL and network connectivity",
-                )
-            elif "InvalidEndpoint" in error_msg:
-                return False, "Invalid endpoint URL format"
-            else:
-                logger.exception("S3 connection test failed")
-                return False, f"Connection failed: {error_msg}"
+            return False, cls._map_boto3_error(str(e), bucket_name)
 
     @classmethod
     def is_configured(cls) -> bool:
@@ -387,18 +364,20 @@ class S3Service:
 
         try:
             client = cls.get_client()
-            response = client.list_objects_v2(
-                Bucket=settings.s3_bucket_name,
-                Prefix=prefix,
-            )
+            # Paginate so a bucket with >1000 objects (retention=0 + years of
+            # backups) isn't silently truncated at the list_objects_v2 cap.
+            paginator = client.get_paginator("list_objects_v2")
 
             files = []
-            for obj in response.get("Contents", []):
-                files.append({
-                    "key": obj["Key"],
-                    "size": obj["Size"],
-                    "last_modified": obj["LastModified"],
-                })
+            for page in paginator.paginate(
+                Bucket=settings.s3_bucket_name, Prefix=prefix
+            ):
+                for obj in page.get("Contents", []):
+                    files.append({
+                        "key": obj["Key"],
+                        "size": obj["Size"],
+                        "last_modified": obj["LastModified"],
+                    })
 
             return files
         except S3ServiceError as e:

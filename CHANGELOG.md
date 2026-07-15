@@ -8,6 +8,105 @@ begins tracking at the current release; earlier history is in the git log.
 
 ## [Unreleased]
 
+## [1.15.0] — July 15, 2026
+
+### Added
+- **External Secret Providers** — a secret's value can now be fetched live from
+  an external secrets manager instead of stored locally. Configure a provider
+  profile under Services → Secret Providers (HashiCorp Vault / OpenBao, AWS
+  Secrets Manager, Infisical, Doppler, or any HTTP JSON endpoint), then point a
+  secret at it with a reference like `kv/myapp#API_KEY`. The value is fetched at
+  run start, cached in-process per a per-profile TTL (never in a shared cache, so
+  plaintext is never persisted at rest), and injected **and masked** exactly like
+  a local secret — so grants, workspace scoping, and the plugin SDK all keep
+  working unchanged. Rotating a value in the provider is picked up automatically
+  on the next run past the TTL. Resolution is fail-closed: a value that can't be
+  fetched fails the run before it starts with a clear, named error (with an opt-in
+  "serve last cached value" fallback for availability-first automation). Adding a
+  new backend is one adapter file — no schema, form, or migration changes. Needs
+  no new environment variables or dependencies; existing local secrets are
+  untouched. Provider profiles and external-secret links are included in instance
+  backups (format 1.6.0, relinked by name on restore); older backups still
+  restore.
+- **Databases** — managed PostgreSQL databases for scripts and plugins,
+  complementing the key-value Data Stores with real SQL (tables, joins,
+  transactions, the whole Python DB ecosystem). Attach a data server with one
+  env var (`PYRUNNER_DATA_DB_URL` — works with a SQLite core, no migration);
+  Owners/Admins provision databases from the console, each one a dedicated
+  Postgres schema + login role so isolation is enforced by Postgres itself.
+  Scripts connect through explicit per-script grants with the new
+  `pyrunner_db` helper (`connect()` / `dsn()` / `sqlalchemy_url()`); plugins
+  provision their own via the SDK's `DatabaseAPI` (API 2.2). Includes a
+  read-only explorer — table browser with CSV export plus a Monitor page
+  (live sessions, blocked/long-running queries, sizes, and slow-query history
+  via `pg_stat_statements` when available) — and full backup/restore: the
+  workspace backup (format 1.5.0) now carries database metadata, grants, and
+  per-schema `pg_dump` data. `docker-compose.postgres.yml` sets the data
+  server up automatically on first boot.
+- **Pinned resource meters** — compact CPU / Mem / Disk mini-bars with live
+  percentages on every cpanel page (desktop widths), polled every 30s, colored
+  by the same 70/90% thresholds as the dashboard card, with a hover tooltip
+  showing exact usage (and VPS totals when running in Docker). Clicking opens
+  the dashboard.
+
+### Changed
+- Dashboard system resources are now container-aware: when PyRunner runs in
+  Docker, the primary CPU and Memory numbers are the container's own usage
+  (read from cgroups v2/v1, matching `docker stats` semantics), with the full
+  host/VPS shown as a smaller secondary line. Memory is reported against the
+  container's limit when one is set (labelled "limit"), otherwise against
+  host RAM; CPU is normalized to the container's quota when set, otherwise to
+  host cores. Non-Docker installs render exactly as before.
+
+### Fixed
+- Scheduled jobs now run in the schedule's configured timezone (they previously
+  always fired in UTC); daylight-saving shifts are re-synced daily, and backup
+  times honor the instance timezone too.
+- "Pause all schedules" no longer permanently disables the built-in
+  worker-heartbeat, update-check, backup, and cleanup schedules — they are
+  re-ensured on resume.
+- "Restart workers" now actually restarts the worker and reports failure
+  honestly, instead of silently doing nothing and reporting success.
+- The General Settings instance name and timezone are now applied everywhere —
+  the header, page titles, email subjects, and datetime display; the two
+  non-functional date-format/time-format fields were removed.
+- Django's configured password validators (length, common-password, numeric,
+  attribute-similarity) now run wherever a password is set, and changing your
+  password no longer errors.
+- Rate limiters use a fixed window that can't be starved by steady sub-limit
+  traffic and is shared across workers (database/Redis cache), not per-process.
+- Weekly and monthly schedules now appear in the dashboard's upcoming runs, are
+  included in backups, and record edit history.
+- Backups round-trip weekly/monthly schedule times, script tags, archived
+  state, and sandbox isolation mode (backup format 1.4.0; older backups still
+  restore).
+- The datastore HTTP API used by scripts on Postgres/sandboxed runs now raises
+  on server/auth errors instead of silently dropping writes; setup status, the
+  queued-tasks list, and the database-size card work correctly on PostgreSQL
+  (the size card shows "N/A" rather than a bogus 0 B on non-SQLite engines).
+- The last-backup size can exceed 2 GB, and backup file listing is no longer
+  capped at 1000 objects.
+- The test-email action now requires an administrator; saving AI settings with a
+  since-deleted provider shows an error instead of silently disabling AI, and a
+  malformed provider id no longer errors.
+- Fonts are self-hosted instead of loaded from the Google Fonts CDN; the README
+  (invite-only auth, real scheduling modes) and `.env.example` (`DEBUG=False` by
+  default) were corrected.
+- A missing `SECRET_KEY` now raises a clear `ImproperlyConfigured` with the
+  generate command instead of a bare `KeyError` (helps first-run source checkouts).
+- Per-IP rate limits (webhooks, inbound channels) can key on the real client IP
+  behind a reverse proxy: set `RATELIMIT_TRUSTED_PROXY_DEPTH` to the number of
+  trusted proxy hops (default `0` keeps the previous `REMOTE_ADDR` behavior).
+
+### Security
+- AI in scripts now works with every configured provider, and third-party
+  provider credentials (Z.AI/OpenRouter/custom, carried on
+  `ANTHROPIC_AUTH_TOKEN`) are masked in run output.
+- Webhook notification URLs are DNS-resolved and rejected when they resolve to
+  internal/private addresses (SSRF), matching the S3 endpoint check.
+- Plugin ZIP installation enforces its size limits against the actual extracted
+  bytes and hardens path-traversal containment (`Path.is_relative_to`).
+
 ## [1.14.0] — July 15, 2026
 
 ### Added

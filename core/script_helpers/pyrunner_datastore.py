@@ -55,6 +55,17 @@ import urllib.request
 from typing import Any, Iterator, List, Optional, Tuple
 
 
+class DataStoreError(RuntimeError):
+    """A datastore operation failed against PyRunner's internal API.
+
+    Raised for server/auth failures (5xx, 401/403, unreachable API) so a failed
+    write or read is never silently swallowed — matching the SQLite backend,
+    which propagates its errors. Subclasses ``RuntimeError`` so existing
+    ``except RuntimeError`` handlers still catch it. (A missing store/key stays a
+    ``ValueError``/``KeyError`` as before.)
+    """
+
+
 # ---------------------------------------------------------------------------
 # Backends
 # ---------------------------------------------------------------------------
@@ -202,14 +213,33 @@ class _ApiBackend:
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:
                 raw = resp.read()
-                return resp.status, (json.loads(raw) if raw else {})
+                status, payload = resp.status, (json.loads(raw) if raw else {})
         except urllib.error.HTTPError as e:
             raw = e.read()
             try:
                 payload = json.loads(raw) if raw else {}
             except ValueError:
                 payload = {}
-            return e.code, payload
+            status = e.code
+        except urllib.error.URLError as e:
+            # Connection-level failure (API down, DNS, timeout): never silent.
+            raise DataStoreError(
+                f"DataStore '{self.name}': could not reach PyRunner's internal "
+                f"API ({method} {url}): {e.reason}"
+            ) from e
+
+        # 2xx and 404 are meaningful to callers (404 => missing store/key, mapped
+        # to ValueError/KeyError). Any other status is a server/auth failure that
+        # must NOT pass silently (e.g. a 401 from an expired token on a long run,
+        # or a 500) — otherwise a failed set()/clear() looks like success.
+        if not (200 <= status < 300 or status == 404):
+            detail = payload.get("error") or payload.get("detail") or ""
+            raise DataStoreError(
+                f"DataStore '{self.name}': internal API returned HTTP {status}"
+                + (f" ({detail})" if detail else "")
+                + f" for {method} {url}"
+            )
+        return status, payload
 
     def _entry_url(self, key: str) -> str:
         return f"{self._ds_url}/entry?key={urllib.parse.quote(str(key))}"

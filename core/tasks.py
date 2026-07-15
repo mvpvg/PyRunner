@@ -180,7 +180,7 @@ def execute_scheduled_run(script_id: str) -> dict:
     queue_script_run(run)
 
     # Update next_run cache
-    schedule.next_run = ScheduleService._calculate_next_run(schedule)
+    schedule.next_run = ScheduleService.calculate_next_run(schedule)
     schedule.save(update_fields=["next_run"])
 
     logger.info(f"Scheduled run {run.id} created for script {script.name}")
@@ -327,6 +327,54 @@ def check_for_updates_task() -> dict:
     except Exception as e:
         # Network/rate-limit errors are non-fatal — just try again next run.
         logger.warning(f"Update check failed: {e}")
+        return {"success": False, "error": str(e)}
+
+
+def resync_schedules_task() -> dict:
+    """
+    Rebuild timezone-aware schedule crons with today's UTC offsets.
+
+    Cron strings can't encode DST rules: sync_schedule converts a schedule's
+    local times to UTC using the offset valid at sync time. This daily task
+    re-runs sync for every non-UTC schedule (and the scheduled backup) so a
+    DST transition drifts fire times for at most a day. UTC schedules never
+    drift, so they are skipped.
+
+    Returns:
+        dict: Result with the number of schedules resynced.
+    """
+    from core.services.backup_schedule_service import BackupScheduleService
+    from core.services.schedule_service import ScheduleService
+
+    try:
+        settings = GlobalSettings.get_settings()
+        if settings.schedules_paused:
+            return {"success": True, "resynced": 0, "note": "schedules paused"}
+
+        count = 0
+        for schedule in (
+            ScriptSchedule.objects.filter(
+                is_active=True,
+                run_mode__in=[
+                    ScriptSchedule.RunMode.DAILY,
+                    ScriptSchedule.RunMode.WEEKLY,
+                    ScriptSchedule.RunMode.MONTHLY,
+                ],
+            )
+            .exclude(timezone__in=["", "UTC"])
+            .select_related("script")
+        ):
+            ScheduleService.sync_schedule(schedule)
+            count += 1
+
+        if (settings.timezone or "UTC") != "UTC":
+            BackupScheduleService.sync_schedule()
+
+        if count:
+            logger.info(f"Resynced {count} timezone-aware schedules")
+        return {"success": True, "resynced": count}
+    except Exception as e:
+        logger.warning(f"Schedule resync failed: {e}")
         return {"success": False, "error": str(e)}
 
 
