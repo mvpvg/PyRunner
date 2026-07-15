@@ -8,6 +8,87 @@ When you cut a release, bump ``pyrunner/version.py`` and add an entry here.
 
 CHANGELOG = [
     {
+        "version": "1.14.0",
+        "date": "July 15, 2026",
+        "headline": (
+            "PyRunner now talks to more than Claude: save multiple AI provider "
+            "profiles — Anthropic, Z.AI GLM, OpenRouter, even a local Ollama — "
+            "and switch the active one with a click. Plus Telegram channels "
+            "with an approval inbox, and Py AI, an assistant that knows your "
+            "instance."
+        ),
+        "changes": [
+            {
+                "tag": "Added",
+                "title": "AI Providers — bring any model",
+                "body": (
+                    "The Claude integration is now a generic AI provider system. "
+                    "Save one profile per provider — Anthropic (subscription or "
+                    "API key), Z.AI GLM, OpenRouter, a local Ollama, or any "
+                    "Anthropic-compatible endpoint — with its own encrypted "
+                    "credential and default model, and switch the active one "
+                    "with a single click. Every provider gets a real Test "
+                    "button: Anthropic runs a live web search, and other "
+                    "providers run a real tool-call round-trip, so you know a "
+                    "model can drive tools before wiring it into automations. "
+                    "Existing Claude setups upgrade automatically — no "
+                    "reconfiguration."
+                ),
+            },
+            {
+                "tag": "Added",
+                "title": "Channels — Telegram, both directions",
+                "body": (
+                    "Scripts can send Telegram messages with the new "
+                    "pyrunner_notify helper, and run-completion notifications "
+                    "can be routed to channels. Inbound is protected by a "
+                    "deny-by-default approval inbox: unknown senders queue up "
+                    "until you approve them, with per-sender rate limits and a "
+                    "daily reply cap."
+                ),
+            },
+            {
+                "tag": "Added",
+                "title": "Py AI — ask your instance anything",
+                "body": (
+                    "A read-only assistant that answers questions about this "
+                    "PyRunner instance — “how many scripts do I have?”, "
+                    "“did the backup run last night?” — using live "
+                    "data from your scripts, runs, schedules, and datastores. "
+                    "Chat from the dashboard, or bind it to a Telegram channel. "
+                    "It can only read: no run, write, or secret access, by "
+                    "construction."
+                ),
+            },
+            {
+                "tag": "Improved",
+                "title": "Operational hardening",
+                "body": (
+                    "A shared cache backend (database-backed by default, Redis "
+                    "opt-in) makes rate limiting and webhook dedup reliable "
+                    "across workers; the Docker image gains a HEALTHCHECK and "
+                    "Brotli-compressed static assets; and the repo now ships "
+                    "CI (tests + linting), a Brand Tracker example plugin, and "
+                    "expanded .env documentation."
+                ),
+            },
+            {
+                "tag": "Security",
+                "title": "Pre-release security audit fixes",
+                "body": (
+                    "Removed the passwordless magic-link login, gated all "
+                    "settings/environment/log administration strictly on "
+                    "superuser, blocked pip option injection in bulk package "
+                    "installs, and added a scoped Content-Security-Policy "
+                    "header. Third-party AI provider keys are now masked in run "
+                    "logs, webhook URLs that resolve to internal addresses are "
+                    "blocked (SSRF), and plugin-ZIP installs enforce their size "
+                    "limits against actual extracted bytes."
+                ),
+            },
+        ],
+    },
+    {
         "version": "1.13.0",
         "date": "June 22, 2026",
         "headline": (

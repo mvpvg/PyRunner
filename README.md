@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?logo=docker&logoColor=white)](https://hub.docker.com/r/hasanaboulhasan/pyrunner)
-[![Version](https://img.shields.io/badge/Version-1.13.0-green.svg)](https://github.com/hassancs91/PyRunner/releases)
+[![Version](https://img.shields.io/badge/Version-1.14.0-green.svg)](https://github.com/hassancs91/PyRunner/releases)
 [![Discord](https://img.shields.io/badge/Discord-Join%20Server-5865F2?logo=discord&logoColor=white)](https://discord.gg/BjkmTn7XSd)
 
 A self-hosted Python script automation platform. Upload a script, schedule it, monitor it — nothing else to configure.
@@ -16,7 +16,7 @@ A self-hosted Python script automation platform. Upload a script, schedule it, m
 - **Secrets Management** — Store encrypted environment variables and secrets
 - **AI for Scripts** — Call AI from your scripts using your Claude subscription, an Anthropic API key, or other providers (Z.AI GLM, OpenRouter, local Ollama, any Anthropic-compatible endpoint) — with saved provider profiles and one-click switching
 - **Notifications** — Get alerts via email, webhook, or Telegram on script completion/failure
-- **Magic Link Auth** — Passwordless authentication via email
+- **Invite-Only Auth** — Admin-invited accounts with email + password login and email-based reset (no open registration)
 - **Single Container** — Deploy with one Docker command
 
 ## Quick Start
